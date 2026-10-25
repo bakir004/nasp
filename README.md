@@ -43,10 +43,24 @@ an immutable `RateLimitDecision` containing allowance, remaining whole tokens,
 capacity, window, and retry delay in seconds. Keys must be nonblank and costs
 positive; implementations reject costs greater than capacity.
 
+## Synchronized token bucket
+
+`SynchronizedTokenBucketLimiter` is a standalone, in-memory baseline. Each client
+starts with a full bucket; tokens refill continuously at `capacity / window`
+tokens per second, up to capacity. Rejected requests do not consume tokens.
+Fractional tokens are retained internally; remaining quota is rounded down and
+retry delay is rounded up to whole seconds. The time source is monotonic.
+
+One synchronized method protects all buckets, prioritizing simplicity over
+throughput. State is local to one JVM, resets on restart, and currently has no
+idle-client eviction. This implementation is not yet wired into HTTP requests.
+
 ## Tests
 
 ```sh
 ./mvnw test
 ```
 
-Tests check application startup, the demo response, and HTTP 404 for an unknown endpoint.
+Tests cover application startup, the demo endpoint, configuration binding and
+validation, decision metadata, bucket exhaustion, weighted requests, refill
+boundaries, client isolation, invalid input, and concurrent quota consumption.
