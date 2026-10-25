@@ -30,7 +30,18 @@ curl -i http://localhost:8080/api/hello
 ```
 
 Expected: HTTP `200 OK`, content type `text/plain`, and body `ok`.
-Rate limiting is not implemented yet.
+HTTP rate limiting is not enforced yet.
+
+## Rate limit configuration
+
+`src/main/resources/application.properties` defines capacity (100 tokens), refill
+window (60 seconds), and forwarded-header trust (disabled). Capacity and window
+must be positive; invalid values fail application startup.
+
+The algorithm contract is `RateLimiter.tryAcquire(key, costTokens)`. It returns
+an immutable `RateLimitDecision` containing allowance, remaining whole tokens,
+capacity, window, and retry delay in seconds. Keys must be nonblank and costs
+positive; implementations reject costs greater than capacity.
 
 ## Tests
 
