@@ -21,4 +21,21 @@ On Windows, use `mvnw.cmd` instead of `./mvnw`.
 ./mvnw spring-boot:run
 ```
 
-The application starts on port 8080. This initial scaffold has no API endpoints yet.
+The application starts on port 8080.
+
+## Demo endpoint
+
+```sh
+curl -i http://localhost:8080/api/hello
+```
+
+Expected: HTTP `200 OK`, content type `text/plain`, and body `ok`.
+Rate limiting is not implemented yet.
+
+## Tests
+
+```sh
+./mvnw test
+```
+
+Tests check application startup, the demo response, and HTTP 404 for an unknown endpoint.
