@@ -103,9 +103,35 @@ an immutable `RateLimitDecision` containing allowance, remaining whole tokens,
 capacity, window, and retry delay in seconds. Keys must be nonblank and costs
 positive; implementations reject costs greater than capacity.
 
+## Atomic token bucket
+
+`AtomicTokenBucketLimiter` is the limiter the HTTP filter uses. Buckets live in
+a `ConcurrentHashMap<String, AtomicLong>`, and each client's entire bucket state
+is that single `long`: the monotonic time, in nanoseconds, at which the bucket
+would have been empty.
+
+- Available tokens = `(now - emptyAt) / nanosPerToken`, capped at capacity
+  (an `emptyAt` older than one full refill counts as a full bucket).
+- Consuming `n` tokens moves `emptyAt` forward by `n * nanosPerToken`.
+- `nanosPerToken` is `window / capacity` rounded up to a whole nanosecond once,
+  at startup. All later arithmetic is exact integer math: a full bucket holds
+  exactly `capacity` tokens, and each token arrives less than 1 ns late.
+
+Every update is a compare-and-set loop: read `emptyAt`, compute the new value,
+and `compareAndSet` it. If another request changed the bucket in between, the
+CAS fails and the loop re-reads, so two requests can never spend the same token.
+No thread holds a lock, and a failed CAS always means another request succeeded,
+so the limiter is lock-free. Rejections never write, so they never contend.
+
+Storing one timestamp instead of a packed `(timestamp, tokens)` pair needs no
+bit-field layout, keeps nanosecond refill precision, and works for every valid
+capacity and window. This encoding is the same as the theoretical arrival time
+used by the Generic Cell Rate Algorithm (GCRA).
+
 ## Synchronized token bucket
 
-`SynchronizedTokenBucketLimiter` is a standalone, in-memory baseline. Each client
+`SynchronizedTokenBucketLimiter` is a standalone, in-memory baseline kept for
+comparison with the atomic implementation. Each client
 starts with a full bucket; tokens refill continuously at `capacity / window`
 tokens per second, up to capacity. Rejected requests do not consume tokens.
 Fractional tokens are retained internally; remaining quota is rounded down and
@@ -113,7 +139,7 @@ retry delay is rounded up to whole seconds. The time source is monotonic.
 
 One synchronized method protects all buckets, prioritizing simplicity over
 throughput. State is local to one JVM, resets on restart, and currently has no
-idle-client eviction. It is the limiter the HTTP filter currently uses.
+idle-client eviction. The atomic limiter shares these limitations.
 
 ## Tests
 
@@ -124,6 +150,10 @@ idle-client eviction. It is the limiter the HTTP filter currently uses.
 Tests cover application startup, the demo endpoint, configuration binding and
 validation, decision metadata, bucket exhaustion, weighted requests, refill
 boundaries, client isolation, invalid input, and concurrent quota consumption.
+Both token buckets run the same contract tests (`TokenBucketLimiterContractTests`).
+The atomic limiter adds nanosecond refill boundaries, fractional refill
+intervals, the largest valid configuration, and concurrency tests across many
+clients, weighted costs, and refills during contention.
 HTTP integration tests cover quota headers, the `429` problem response, per-client
 isolation, and the `/api/*` filter scope. Client identification tests cover
 source priority, credential hashing, and the `X-Forwarded-For` trust boundary.

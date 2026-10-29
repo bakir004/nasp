@@ -13,7 +13,7 @@ public class RateLimitConfig {
 
     @Bean
     RateLimiter rateLimiter(RateLimitProperties properties) {
-        return new SynchronizedTokenBucketLimiter(properties);
+        return new AtomicTokenBucketLimiter(properties);
     }
 
     @Bean
