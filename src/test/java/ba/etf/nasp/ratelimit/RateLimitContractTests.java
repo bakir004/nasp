@@ -1,6 +1,8 @@
 package ba.etf.nasp.ratelimit;
 
 import org.junit.jupiter.api.Test;
+import org.springframework.boot.autoconfigure.AutoConfigurations;
+import org.springframework.boot.autoconfigure.jackson.JacksonAutoConfiguration;
 import org.springframework.boot.test.context.runner.ApplicationContextRunner;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -9,6 +11,7 @@ import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException
 class RateLimitContractTests {
 
     private final ApplicationContextRunner contextRunner = new ApplicationContextRunner()
+            .withConfiguration(AutoConfigurations.of(JacksonAutoConfiguration.class))
             .withUserConfiguration(RateLimitConfig.class);
 
     @Test
