@@ -17,9 +17,15 @@ public class RateLimitConfig {
     }
 
     @Bean
+    ClientKeyResolver clientKeyResolver(RateLimitProperties properties) {
+        return new ClientKeyResolver(properties.trustForwardedFor());
+    }
+
+    @Bean
     FilterRegistrationBean<RateLimitFilter> rateLimitFilter(RateLimiter rateLimiter,
-            ObjectMapper objectMapper) {
-        var registration = new FilterRegistrationBean<>(new RateLimitFilter(rateLimiter, objectMapper));
+            ClientKeyResolver clientKeyResolver, ObjectMapper objectMapper) {
+        var registration = new FilterRegistrationBean<>(
+                new RateLimitFilter(rateLimiter, clientKeyResolver, objectMapper));
         registration.addUrlPatterns("/api/*");
         registration.setOrder(Ordered.HIGHEST_PRECEDENCE + 10);
         return registration;

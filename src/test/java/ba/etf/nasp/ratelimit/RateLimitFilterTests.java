@@ -65,6 +65,27 @@ class RateLimitFilterTests {
     }
 
     @Test
+    void apiKeysBehindOneAddressHaveIndependentQuotas() throws Exception {
+        withApiKey("10.0.0.7", "key-a");
+        withApiKey("10.0.0.7", "key-a");
+        withApiKey("10.0.0.7", "key-a").andExpect(status().isTooManyRequests());
+        withApiKey("10.0.0.7", "key-b").andExpect(status().isOk());
+        hello("10.0.0.7")
+                .andExpect(status().isOk())
+                .andExpect(header().string("RateLimit", "\"default\";r=1"));
+    }
+
+    @Test
+    void forwardedForIsIgnoredByDefault() throws Exception {
+        hello("10.0.0.8");
+        hello("10.0.0.8");
+        mockMvc.perform(get("/api/hello").header("X-Forwarded-For", "203.0.113.7").with(request -> {
+            request.setRemoteAddr("10.0.0.8");
+            return request;
+        })).andExpect(status().isTooManyRequests());
+    }
+
+    @Test
     void unknownApiPathsStillConsumeQuota() throws Exception {
         request("/api/missing", "10.0.0.5")
                 .andExpect(status().isNotFound())
@@ -83,6 +104,13 @@ class RateLimitFilterTests {
 
     private ResultActions hello(String remoteAddress) throws Exception {
         return request("/api/hello", remoteAddress);
+    }
+
+    private ResultActions withApiKey(String remoteAddress, String apiKey) throws Exception {
+        return mockMvc.perform(get("/api/hello").header("X-API-Key", apiKey).with(request -> {
+            request.setRemoteAddr(remoteAddress);
+            return request;
+        }));
     }
 
     private ResultActions request(String path, String remoteAddress) throws Exception {

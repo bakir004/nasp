@@ -23,29 +23,26 @@ public class RateLimitFilter extends OncePerRequestFilter {
             "https://iana.org/assignments/http-problem-types#quota-exceeded";
 
     private final RateLimiter rateLimiter;
+    private final ClientKeyResolver clientKeyResolver;
     private final ObjectMapper objectMapper;
 
-    public RateLimitFilter(RateLimiter rateLimiter, ObjectMapper objectMapper) {
+    public RateLimitFilter(RateLimiter rateLimiter, ClientKeyResolver clientKeyResolver,
+            ObjectMapper objectMapper) {
         this.rateLimiter = Objects.requireNonNull(rateLimiter, "rateLimiter");
+        this.clientKeyResolver = Objects.requireNonNull(clientKeyResolver, "clientKeyResolver");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
     }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
             FilterChain filterChain) throws ServletException, IOException {
-        RateLimitDecision decision = rateLimiter.tryAcquire(clientKey(request), 1);
+        RateLimitDecision decision = rateLimiter.tryAcquire(clientKeyResolver.resolve(request), 1);
         setRateLimitHeaders(response, decision);
         if (decision.allowed()) {
             filterChain.doFilter(request, response);
         } else {
             writeTooManyRequests(request, response, decision);
         }
-    }
-
-    // Client identification policies (principal, API key, forwarded headers) are not applied yet.
-    private static String clientKey(HttpServletRequest request) {
-        String remoteAddress = request.getRemoteAddr();
-        return "ip:" + (remoteAddress == null || remoteAddress.isBlank() ? "unknown" : remoteAddress);
     }
 
     // Header syntax follows the IETF HTTPAPI RateLimit header fields draft.

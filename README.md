@@ -34,9 +34,8 @@ Expected: HTTP `200 OK`, content type `text/plain`, and body `ok`.
 ## HTTP rate limiting
 
 `RateLimitFilter` runs for every request under `/api/*`, before the request
-reaches a controller, and charges one token per request. Clients are currently
-identified by servlet remote address only. Unknown `/api/*` paths also consume
-quota; paths outside `/api/*` are never limited.
+reaches a controller, and charges one token per request. Unknown `/api/*` paths
+also consume quota; paths outside `/api/*` are never limited.
 
 Every limited response carries the current quota, following the IETF HTTPAPI
 RateLimit header fields draft:
@@ -69,6 +68,29 @@ To see a rejection locally, send more than 100 requests within a minute:
 ```sh
 for i in $(seq 101); do curl -s -o /dev/null -w '%{http_code}\n' http://localhost:8080/api/hello; done | sort | uniq -c
 ```
+
+## Client identification
+
+`ClientKeyResolver` chooses each request's bucket, using the first source that
+is present and nonblank:
+
+1. Authenticated principal name: `principal:<sha256>`
+2. `X-API-Key` header: `api-key:<sha256>`
+3. `X-Forwarded-For`, only when `rate-limit.trust-forwarded-for=true`: `ip:<address>`
+4. Servlet remote address: `ip:<address>`
+
+Principals and API keys are hashed with SHA-256, so raw credentials are never
+stored as limiter keys.
+
+`X-Forwarded-For` is ignored by default because any client can send it. Enable
+it only when the application is reachable solely through one reverse proxy that
+appends the client address. The resolver then uses the **last** entry, the one
+added by that proxy; earlier entries come from the client and can be forged.
+Chains of several proxies are not supported.
+
+API keys are not validated, since the project has no key registry. A client
+that sends a different `X-API-Key` on each request gets a fresh bucket each
+time, so the API-key policy only has value once keys are checked upstream.
 
 ## Rate limit configuration
 
@@ -103,4 +125,5 @@ Tests cover application startup, the demo endpoint, configuration binding and
 validation, decision metadata, bucket exhaustion, weighted requests, refill
 boundaries, client isolation, invalid input, and concurrent quota consumption.
 HTTP integration tests cover quota headers, the `429` problem response, per-client
-isolation, and the `/api/*` filter scope.
+isolation, and the `/api/*` filter scope. Client identification tests cover
+source priority, credential hashing, and the `X-Forwarded-For` trust boundary.
