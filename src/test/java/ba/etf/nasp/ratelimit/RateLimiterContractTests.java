@@ -2,7 +2,9 @@ package ba.etf.nasp.ratelimit;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
@@ -14,8 +16,11 @@ import org.junit.jupiter.api.Test;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
 
-/** Behavior every token bucket implementation must share; subclasses supply the implementation. */
-abstract class TokenBucketLimiterContractTests {
+/**
+ * Behavior every limiter must share: both token buckets and the leaky bucket meter make the same
+ * decisions for the same capacity and window. Subclasses supply the implementation.
+ */
+abstract class RateLimiterContractTests {
 
     protected final AtomicLong time = new AtomicLong();
     protected final RateLimitMetrics metrics = new RateLimitMetrics();
@@ -132,5 +137,94 @@ abstract class TokenBucketLimiterContractTests {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
         }
+    }
+
+    @Test
+    void concurrentClientsEachReceiveExactlyCapacity() throws Exception {
+        int clients = 8;
+        AtomicLong[] allowed = new AtomicLong[clients];
+        for (int i = 0; i < clients; i++) {
+            allowed[i] = new AtomicLong();
+        }
+        runConcurrently(32, 400, task -> () -> {
+            int client = task % clients;
+            if (limiter.tryAcquire("client-" + client, 1).allowed()) {
+                allowed[client].incrementAndGet();
+            }
+            return null;
+        });
+        for (AtomicLong count : allowed) {
+            assertThat(count).hasValue(10);
+        }
+    }
+
+    @Test
+    void concurrentWeightedRequestsCannotOverspendCapacity() throws Exception {
+        AtomicLong spent = new AtomicLong();
+        runConcurrently(16, 100, task -> () -> {
+            long cost = task % 3 + 1;
+            if (limiter.tryAcquire("shared", cost).allowed()) {
+                spent.addAndGet(cost);
+            }
+            return null;
+        });
+        // 33 cost-1 requests outnumber the 10 tokens, so the bucket always ends exactly empty.
+        assertThat(spent).hasValue(10);
+    }
+
+    /** For lock-free limiters: concurrent allowed requests on one bucket must produce retries. */
+    protected void assertCasRetriesObservedUnderContention() throws Exception {
+        // Retries need two threads to race on one bucket, which the scheduler may not produce
+        // in a single round, so the test repeats until it observes one.
+        int threads = 16;
+        int perThread = 2_000;
+        for (int round = 0; round < 20; round++) {
+            RateLimitMetrics roundMetrics = new RateLimitMetrics();
+            RateLimiter large = createLimiter(
+                    new RateLimitProperties(threads * perThread, 60, false), roundMetrics, () -> 0);
+            runConcurrently(threads, threads, task -> () -> {
+                for (int i = 0; i < perThread; i++) {
+                    large.tryAcquire("shared", 1);
+                }
+                return null;
+            });
+            var snapshot = roundMetrics.snapshot();
+            assertThat(snapshot.allowedRequests()).isEqualTo((long) threads * perThread);
+            assertThat(snapshot.rejectedRequests()).isZero();
+            if (snapshot.casRetries() > 0) {
+                return;
+            }
+        }
+        throw new AssertionError("No CAS retry observed in 20 contended rounds");
+    }
+
+    /** Runs the created tasks on a thread pool, releasing them together to maximize contention. */
+    protected static void runConcurrently(int threads, int tasks, TaskFactory factory) throws Exception {
+        ExecutorService executor = Executors.newFixedThreadPool(threads);
+        CountDownLatch start = new CountDownLatch(1);
+        List<Future<Void>> results = new ArrayList<>();
+        try {
+            for (int i = 0; i < tasks; i++) {
+                Callable<Void> task = factory.create(i);
+                results.add(executor.submit(() -> {
+                    if (!start.await(5, TimeUnit.SECONDS)) {
+                        throw new IllegalStateException("Start signal timed out");
+                    }
+                    return task.call();
+                }));
+            }
+            start.countDown();
+            for (Future<Void> result : results) {
+                result.get(10, TimeUnit.SECONDS);
+            }
+        } finally {
+            executor.shutdownNow();
+            assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();
+        }
+    }
+
+    @FunctionalInterface
+    protected interface TaskFactory {
+        Callable<Void> create(int task);
     }
 }

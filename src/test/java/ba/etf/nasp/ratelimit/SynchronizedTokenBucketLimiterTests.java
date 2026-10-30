@@ -2,7 +2,7 @@ package ba.etf.nasp.ratelimit;
 
 import java.util.function.LongSupplier;
 
-class SynchronizedTokenBucketLimiterTests extends TokenBucketLimiterContractTests {
+class SynchronizedTokenBucketLimiterTests extends RateLimiterContractTests {
 
     @Override
     protected RateLimiter createLimiter(RateLimitProperties properties, RateLimitMetrics metrics,

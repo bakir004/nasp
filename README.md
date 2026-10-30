@@ -128,15 +128,42 @@ bit-field layout, keeps nanosecond refill precision, and works for every valid
 capacity and window. This encoding is the same as the theoretical arrival time
 used by the Generic Cell Rate Algorithm (GCRA).
 
+## Leaky bucket
+
+`LeakyBucketLimiter` is an alternative algorithm, used as a meter: each request
+pours its cost into the client's bucket, the bucket drains at `capacity / window`
+tokens per second, and a request is allowed only if it fits without
+overflowing. New clients start with an empty bucket.
+
+With the same capacity and window, a leaky bucket meter makes exactly the same
+decisions as the token bucket: its level is the token bucket's spent quota
+(`level = capacity - tokens`). A randomized test checks this decision by
+decision. The implementations differ in state and synchronization:
+
+| | Atomic token bucket | Leaky bucket |
+|---|---|---|
+| Per-client state | one `long` (`emptyAt`) | immutable `Level(levelNanos, updatedAt)` record |
+| Atomic holder | `AtomicLong` | `AtomicReference<Level>` |
+| Allocation per allowed request | none | one `Level` object |
+
+Swapping an immutable object through `AtomicReference` updates two fields
+together without bit packing, at the cost of one allocation per allowed
+request. The leaky bucket also records allowed, rejected, and CAS retry metrics.
+It is not wired into HTTP requests; the filter uses the atomic token bucket.
+
+The queue form of the leaky bucket, which delays requests to a constant output
+rate instead of rejecting them, is not implemented: it would hold servlet
+threads while requests wait.
+
 ## Metrics
 
 `RateLimitMetrics` is a Spring bean holding three in-memory counters:
 
 | Counter | Recorded by | Meaning |
 |---|---|---|
-| `allowedRequests` | both token buckets | decisions that consumed tokens |
-| `rejectedRequests` | both token buckets | decisions refused for lack of tokens |
-| `casRetries` | atomic token bucket | compare-and-set attempts lost to a concurrent update |
+| `allowedRequests` | all limiters | decisions that consumed tokens |
+| `rejectedRequests` | all limiters | decisions refused for lack of tokens |
+| `casRetries` | atomic token bucket, leaky bucket | compare-and-set attempts lost to a concurrent update |
 
 Requests rejected as invalid input (blank key, bad cost) are not counted.
 Counters are `LongAdder`s, which spread concurrent increments across cells
@@ -170,11 +197,12 @@ idle-client eviction. The atomic limiter shares these limitations.
 Tests cover application startup, the demo endpoint, configuration binding and
 validation, decision metadata, bucket exhaustion, weighted requests, refill
 boundaries, client isolation, invalid input, and concurrent quota consumption.
-Both token buckets run the same contract tests (`TokenBucketLimiterContractTests`).
-The atomic limiter adds nanosecond refill boundaries, fractional refill
+All three limiters run the same contract tests (`RateLimiterContractTests`).
+The leaky bucket adds drain timing and decision-by-decision equivalence with the
+atomic token bucket. The atomic limiter adds nanosecond refill boundaries, fractional refill
 intervals, the largest valid configuration, and concurrency tests across many
 clients, weighted costs, and refills during contention. Metrics tests cover
-per-outcome counting in both limiters, lost-update safety under concurrent
+per-outcome counting in every limiter, lost-update safety under concurrent
 increments, observed CAS retries under contention, and HTTP decisions reaching
 the application's metrics bean.
 HTTP integration tests cover quota headers, the `429` problem response, per-client
