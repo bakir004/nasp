@@ -8,6 +8,7 @@ import org.springframework.http.MediaType;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 
+import static org.assertj.core.api.Assertions.assertThat;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.content;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
@@ -21,6 +22,9 @@ class RateLimitFilterTests {
 
     @Autowired
     private MockMvc mockMvc;
+
+    @Autowired
+    private RateLimitMetrics metrics;
 
     @Test
     void allowedRequestsReachControllerWithQuotaHeaders() throws Exception {
@@ -83,6 +87,18 @@ class RateLimitFilterTests {
             request.setRemoteAddr("10.0.0.8");
             return request;
         })).andExpect(status().isTooManyRequests());
+    }
+
+    @Test
+    void httpDecisionsAreRecordedInApplicationMetrics() throws Exception {
+        var before = metrics.snapshot();
+        hello("10.0.0.9");
+        hello("10.0.0.9");
+        hello("10.0.0.9").andExpect(status().isTooManyRequests());
+        request("/missing", "10.0.0.9");
+        var after = metrics.snapshot();
+        assertThat(after.allowedRequests() - before.allowedRequests()).isEqualTo(2);
+        assertThat(after.rejectedRequests() - before.rejectedRequests()).isEqualTo(1);
     }
 
     @Test

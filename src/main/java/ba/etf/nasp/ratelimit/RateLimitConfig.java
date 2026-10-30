@@ -12,8 +12,13 @@ import org.springframework.core.Ordered;
 public class RateLimitConfig {
 
     @Bean
-    RateLimiter rateLimiter(RateLimitProperties properties) {
-        return new AtomicTokenBucketLimiter(properties);
+    RateLimitMetrics rateLimitMetrics() {
+        return new RateLimitMetrics();
+    }
+
+    @Bean
+    RateLimiter rateLimiter(RateLimitProperties properties, RateLimitMetrics metrics) {
+        return new AtomicTokenBucketLimiter(properties, metrics);
     }
 
     @Bean

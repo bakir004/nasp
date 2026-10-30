@@ -128,6 +128,26 @@ bit-field layout, keeps nanosecond refill precision, and works for every valid
 capacity and window. This encoding is the same as the theoretical arrival time
 used by the Generic Cell Rate Algorithm (GCRA).
 
+## Metrics
+
+`RateLimitMetrics` is a Spring bean holding three in-memory counters:
+
+| Counter | Recorded by | Meaning |
+|---|---|---|
+| `allowedRequests` | both token buckets | decisions that consumed tokens |
+| `rejectedRequests` | both token buckets | decisions refused for lack of tokens |
+| `casRetries` | atomic token bucket | compare-and-set attempts lost to a concurrent update |
+
+Requests rejected as invalid input (blank key, bad cost) are not counted.
+Counters are `LongAdder`s, which spread concurrent increments across cells
+instead of contending on one value, so recording metrics adds no hot spot to the
+request path. `snapshot()` returns all three values; because each counter is read
+separately, a snapshot taken under load is approximate.
+
+`casRetries` measures contention on the lock-free path. A retry happens only
+when two allowed requests for the same client race; rejections never write.
+Metrics are not exposed over HTTP; they are read in code and tests.
+
 ## Synchronized token bucket
 
 `SynchronizedTokenBucketLimiter` is a standalone, in-memory baseline kept for
@@ -153,7 +173,10 @@ boundaries, client isolation, invalid input, and concurrent quota consumption.
 Both token buckets run the same contract tests (`TokenBucketLimiterContractTests`).
 The atomic limiter adds nanosecond refill boundaries, fractional refill
 intervals, the largest valid configuration, and concurrency tests across many
-clients, weighted costs, and refills during contention.
+clients, weighted costs, and refills during contention. Metrics tests cover
+per-outcome counting in both limiters, lost-update safety under concurrent
+increments, observed CAS retries under contention, and HTTP decisions reaching
+the application's metrics bean.
 HTTP integration tests cover quota headers, the `429` problem response, per-client
 isolation, and the `/api/*` filter scope. Client identification tests cover
 source priority, credential hashing, and the `X-Forwarded-For` trust boundary.

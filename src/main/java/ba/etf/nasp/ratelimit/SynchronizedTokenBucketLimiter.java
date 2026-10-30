@@ -10,18 +10,21 @@ public final class SynchronizedTokenBucketLimiter implements RateLimiter {
 
     private final int capacity;
     private final int windowSeconds;
+    private final RateLimitMetrics metrics;
     private final LongSupplier nanoTime;
     private final Map<String, Bucket> buckets = new HashMap<>();
 
-    public SynchronizedTokenBucketLimiter(RateLimitProperties properties) {
-        this(properties, System::nanoTime);
+    public SynchronizedTokenBucketLimiter(RateLimitProperties properties, RateLimitMetrics metrics) {
+        this(properties, metrics, System::nanoTime);
     }
 
     // Injectable monotonic time source keeps refill tests deterministic.
-    SynchronizedTokenBucketLimiter(RateLimitProperties properties, LongSupplier nanoTime) {
+    SynchronizedTokenBucketLimiter(RateLimitProperties properties, RateLimitMetrics metrics,
+            LongSupplier nanoTime) {
         Objects.requireNonNull(properties, "properties");
         this.capacity = properties.capacityTokens();
         this.windowSeconds = properties.windowSeconds();
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
     }
 
@@ -50,7 +53,10 @@ public final class SynchronizedTokenBucketLimiter implements RateLimiter {
         } else {
             retryAfter = (long) Math.ceil((costTokens - bucket.tokens) * windowSeconds / capacity);
         }
-        return new RateLimitDecision(allowed, (long) bucket.tokens, capacity, windowSeconds, retryAfter);
+        var decision = new RateLimitDecision(allowed, (long) bucket.tokens, capacity,
+                windowSeconds, retryAfter);
+        metrics.recordDecision(decision);
+        return decision;
     }
 
     private static final class Bucket {

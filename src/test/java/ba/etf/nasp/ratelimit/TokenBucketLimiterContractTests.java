@@ -18,9 +18,12 @@ import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException
 abstract class TokenBucketLimiterContractTests {
 
     protected final AtomicLong time = new AtomicLong();
-    protected final RateLimiter limiter = createLimiter(new RateLimitProperties(10, 20, false), time::get);
+    protected final RateLimitMetrics metrics = new RateLimitMetrics();
+    protected final RateLimiter limiter =
+            createLimiter(new RateLimitProperties(10, 20, false), metrics, time::get);
 
-    protected abstract RateLimiter createLimiter(RateLimitProperties properties, LongSupplier nanoTime);
+    protected abstract RateLimiter createLimiter(RateLimitProperties properties,
+            RateLimitMetrics metrics, LongSupplier nanoTime);
 
     @Test
     void startsFullAndRejectsWhenExhausted() {
@@ -87,6 +90,18 @@ abstract class TokenBucketLimiterContractTests {
             assertThatIllegalArgumentException().isThrownBy(() -> limiter.tryAcquire("client", cost));
         }
         assertThat(limiter.tryAcquire("client", 10).allowed()).isTrue();
+        assertThat(metrics.snapshot()).isEqualTo(new RateLimitMetrics.Snapshot(1, 0, 0));
+    }
+
+    @Test
+    void recordsEveryDecisionByOutcome() {
+        assertThat(metrics.snapshot()).isEqualTo(new RateLimitMetrics.Snapshot(0, 0, 0));
+        limiter.tryAcquire("a", 7);
+        limiter.tryAcquire("a", 4);
+        limiter.tryAcquire("a", 3);
+        limiter.tryAcquire("a", 1);
+        limiter.tryAcquire("b", 1);
+        assertThat(metrics.snapshot()).isEqualTo(new RateLimitMetrics.Snapshot(3, 2, 0));
     }
 
     @Test
@@ -111,6 +126,8 @@ abstract class TokenBucketLimiterContractTests {
                 }
             }
             assertThat(allowed).isEqualTo(10);
+            assertThat(metrics.snapshot().allowedRequests()).isEqualTo(10);
+            assertThat(metrics.snapshot().rejectedRequests()).isEqualTo(90);
         } finally {
             executor.shutdownNow();
             assertThat(executor.awaitTermination(5, TimeUnit.SECONDS)).isTrue();

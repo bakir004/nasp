@@ -21,15 +21,17 @@ public final class AtomicTokenBucketLimiter implements RateLimiter {
     private final int windowSeconds;
     private final long nanosPerToken;
     private final long fullBucketNanos;
+    private final RateLimitMetrics metrics;
     private final LongSupplier nanoTime;
     private final ConcurrentMap<String, AtomicLong> buckets = new ConcurrentHashMap<>();
 
-    public AtomicTokenBucketLimiter(RateLimitProperties properties) {
-        this(properties, System::nanoTime);
+    public AtomicTokenBucketLimiter(RateLimitProperties properties, RateLimitMetrics metrics) {
+        this(properties, metrics, System::nanoTime);
     }
 
     // Injectable monotonic time source keeps refill tests deterministic.
-    AtomicTokenBucketLimiter(RateLimitProperties properties, LongSupplier nanoTime) {
+    AtomicTokenBucketLimiter(RateLimitProperties properties, RateLimitMetrics metrics,
+            LongSupplier nanoTime) {
         Objects.requireNonNull(properties, "properties");
         this.capacity = properties.capacityTokens();
         this.windowSeconds = properties.windowSeconds();
@@ -37,6 +39,7 @@ public final class AtomicTokenBucketLimiter implements RateLimiter {
         // holds exactly `capacity` tokens, and each token arrives less than 1 ns late.
         this.nanosPerToken = ceilDiv(windowSeconds * NANOS_PER_SECOND, capacity);
         this.fullBucketNanos = nanosPerToken * capacity;
+        this.metrics = Objects.requireNonNull(metrics, "metrics");
         this.nanoTime = Objects.requireNonNull(nanoTime, "nanoTime");
     }
 
@@ -63,16 +66,23 @@ public final class AtomicTokenBucketLimiter implements RateLimiter {
                 // Rejections leave the state untouched, so they cost nothing and never retry.
                 long remaining = Math.max(0, availableNanos) / nanosPerToken;
                 long retryAfter = ceilDiv(costNanos - availableNanos, NANOS_PER_SECOND);
-                return new RateLimitDecision(false, remaining, capacity, windowSeconds, retryAfter);
+                return record(new RateLimitDecision(false, remaining, capacity, windowSeconds,
+                        retryAfter));
             }
 
             long nextEmptyAt = base + costNanos;
             if (state.compareAndSet(emptyAt, nextEmptyAt)) {
                 long remaining = (now - nextEmptyAt) / nanosPerToken;
-                return new RateLimitDecision(true, remaining, capacity, windowSeconds, 0);
+                return record(new RateLimitDecision(true, remaining, capacity, windowSeconds, 0));
             }
             // Another request updated this bucket first; re-read its state and try again.
+            metrics.recordCasRetry();
         }
+    }
+
+    private RateLimitDecision record(RateLimitDecision decision) {
+        metrics.recordDecision(decision);
+        return decision;
     }
 
     private static long ceilDiv(long dividend, long divisor) {
