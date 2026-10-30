@@ -8,9 +8,13 @@ request reaches a controller, and rejects clients that exceed it with
 The project contains three interchangeable limiter implementations behind one
 interface, so their correctness and concurrency strategies can be compared:
 
-- **Atomic token bucket**: lock-free, one `AtomicLong` per client (used by the application)
+- **Atomic token bucket**: lock-free, one `AtomicLong` per client (the default)
 - **Synchronized token bucket**: one lock around all buckets (baseline)
-- **Leaky bucket meter**: lock-free, an immutable state record per client swapped with `AtomicReference`
+- **Leaky bucket meter**: lock-free, an immutable state record per client swapped with `AtomicReference` (`rate-limit.algorithm=leaky-bucket`)
+
+It also contains a **leaky bucket queue**, a traffic shaper that delays bursts
+instead of rejecting them. Each client's waiting requests sit in a ring buffer
+and leak out at a steady rate (`rate-limit.algorithm=leaky-bucket-queue`).
 
 ## Contents
 
@@ -22,6 +26,7 @@ interface, so their correctness and concurrency strategies can be compared:
 - [Client identification](#client-identification)
 - [Metrics](#metrics)
 - [Usage examples](#usage-examples)
+- [Observability page](#observability-page)
 - [Testing](#testing)
 - [Limitations](#limitations)
 
@@ -44,31 +49,38 @@ A request within quota returns `200 OK` with body `ok` and the current quota in
 ```text
 HTTP request
   -> servlet container
+  -> CorsFilter               (only for /api/*, only if origins are configured)
   -> RateLimitFilter          (only for /api/*)
        ClientKeyResolver  -> client key
-       RateLimiter        -> RateLimitDecision
-       allowed:  add RateLimit headers, continue
-       rejected: add RateLimit headers, write 429 problem response, stop
+       RequestAdmitter    -> RateLimitDecision + when the request may proceed
+       allowed now:   add RateLimit headers, continue
+       allowed later: add RateLimit headers, suspend (servlet async), continue on release
+       rejected:      add RateLimit headers, write 429 problem response, stop
   -> DispatcherServlet
   -> DemoController           (GET /api/hello)
 ```
 
-The HTTP layer depends only on the `RateLimiter` interface; the algorithms know
-nothing about HTTP. That keeps each part testable on its own and lets the
+The HTTP layer depends only on the `RequestAdmitter` interface; the algorithms
+know nothing about HTTP. A policing `RateLimiter` is adapted with
+`RequestAdmitter.Immediate`, which admits or rejects at once. That keeps each part testable on its own and lets the
 algorithm be replaced in one place (`RateLimitConfig`).
 
 | Component | Responsibility |
 |---|---|
-| `RateLimitFilter` | Servlet filter on `/api/*`: charges one token per request, writes headers and 429 responses |
+| `RateLimitFilter` | Servlet filter on `/api/*`: admits each request, writes headers and 429 responses, suspends queued requests until release |
+| `RequestAdmitter` | Admission contract: `Admission admit(String key)`, a decision plus a `CompletionStage` completed when the request may proceed |
 | `ClientKeyResolver` | Chooses the client key: principal, API key, trusted forwarded address, or remote address |
 | `RateLimiter` | Algorithm contract: `RateLimitDecision tryAcquire(String key, long costTokens)` |
 | `RateLimitDecision` | Immutable result: allowed, remaining tokens, capacity, window, retry delay |
-| `AtomicTokenBucketLimiter` | Lock-free token bucket; the active limiter |
+| `AtomicTokenBucketLimiter` | Lock-free token bucket; the default limiter |
 | `SynchronizedTokenBucketLimiter` | Lock-based token bucket baseline |
 | `LeakyBucketLimiter` | Lock-free leaky bucket meter |
+| `LeakyBucketQueue` | Leaky bucket queue (traffic shaper): per-client ring buffer drained at the policy rate |
+| `RingBuffer` | Bounded FIFO queue on a fixed circular array |
 | `RateLimitMetrics` | Allowed, rejected and CAS-retry counters |
 | `RateLimitProperties` | Validated `rate-limit.*` configuration |
 | `RateLimitConfig` | Spring wiring: properties, metrics, limiter, resolver, filter registration |
+| `CorsConfig`, `CorsProperties` | Optional CORS filter for browser pages on other origins |
 
 ```text
 src/main/java/ba/etf/nasp
@@ -78,7 +90,11 @@ src/main/java/ba/etf/nasp
     RateLimitFilter.java, ClientKeyResolver.java
     RateLimiter.java, RateLimitDecision.java
     AtomicTokenBucketLimiter.java, SynchronizedTokenBucketLimiter.java, LeakyBucketLimiter.java
+    RequestAdmitter.java, LeakyBucketQueue.java, RingBuffer.java
     RateLimitMetrics.java, RateLimitProperties.java, RateLimitConfig.java
+    CorsConfig.java, CorsProperties.java
+observability/
+  index.html                  live dashboard (see Observability page)
 ```
 
 ### The limiter contract
@@ -110,7 +126,7 @@ tokens; tokens flow back continuously at the refill rate, never exceeding
 capacity. Short bursts up to the capacity are allowed, while the long-run rate
 is bounded by the refill rate.
 
-### Atomic token bucket (active)
+### Atomic token bucket (default)
 
 `AtomicTokenBucketLimiter` keeps buckets in a
 `ConcurrentHashMap<String, AtomicLong>`. Each client's entire state is a single
@@ -181,9 +197,54 @@ together without bit packing, at the cost of one short-lived allocation per
 allowed request. If the clock appears to move backward, the leaky bucket keeps
 the later timestamp, so the same interval is never drained twice.
 
-The queue form of the leaky bucket, which delays requests to a constant output
-rate instead of rejecting them, is not implemented, because it would hold
-servlet threads while requests wait.
+### Leaky bucket queue (traffic shaping)
+
+The algorithms above *police* traffic: a request is allowed or rejected at once,
+so a full bucket's worth of requests can pass in a single burst.
+`LeakyBucketQueue` *shapes* it instead. Each client's requests wait in a queue
+and leave one at a time, every `window / capacity`, so whatever the arrival
+pattern, the endpoint sees a steady stream:
+
+| A burst of 30 (capacity 20, 2 per second) | Token bucket | Leaky bucket queue |
+|---|---|---|
+| Admitted | 20, all at once | 20: one now, then one every 0.5 s |
+| Rejected | 10 | 10 |
+| Longest wait | none | 9.5 s |
+
+Admission is the same: both admit `capacity` requests from a burst. The
+difference is when admitted requests proceed.
+
+**Data structure.** Each client's waiting requests are kept in a `RingBuffer`, a
+bounded FIFO queue on a fixed array whose head index and size wrap around the
+end. Offering and polling are O(1), never move elements, and never allocate.
+Each element is a `CompletableFuture` that completes when its request is
+released.
+
+**Leaking.** One request leaks out per interval:
+
+- If the bucket is empty and no leak is due, a request leaks straight through.
+- Otherwise it is appended to the ring buffer. A single scheduled task per
+  non-empty bucket polls the oldest request each interval and completes its
+  future, then reschedules itself while requests remain.
+- The request that leaked last still occupies the bucket until the next leak is
+  due, so a burst admits exactly `capacity` requests, as many as the token bucket.
+- A request that finds the bucket full is rejected with `Retry-After`: the time
+  until the next leak frees a place.
+- The next leak is timed from the actual release, so a late timer never lets two
+  requests out closer together than the interval.
+
+A per-client monitor guards the buffer and timing fields. Admissions and leaks
+of different clients never contend.
+
+**Waiting without threads.** `RateLimitFilter` suspends a queued request with
+servlet async processing (`request.startAsync()`). The servlet thread returns
+to the pool, and when the future completes the request is dispatched to the
+controller. Waiting requests therefore hold a queue slot and an open connection,
+but no server thread; a test runs four waiting requests on a server with two
+threads.
+
+The `RateLimit` header's `r` is the number of free places in the bucket after
+the request was queued.
 
 ## Configuration
 
@@ -194,6 +255,8 @@ Settings live in `src/main/resources/application.properties`:
 | `rate-limit.capacity-tokens` | `100` | Bucket size: the largest burst a client may send |
 | `rate-limit.window-seconds` | `60` | Time to refill a full bucket from empty |
 | `rate-limit.trust-forwarded-for` | `false` | Identify clients by `X-Forwarded-For` (see [Client identification](#client-identification)) |
+| `rate-limit.algorithm` | `token-bucket` | How the filter admits requests: `token-bucket` (`AtomicTokenBucketLimiter`), `leaky-bucket` (`LeakyBucketLimiter`), or `leaky-bucket-queue` (`LeakyBucketQueue`) |
+| `cors.allowed-origins` | empty (CORS off) | Browser origins allowed to call `/api/*` (see [CORS](#cors)) |
 
 Capacity and window must be positive; invalid values stop the application at
 startup. The refill rate is `capacity / window` tokens per second.
@@ -209,8 +272,16 @@ Boot mechanisms:
 RATELIMIT_CAPACITYTOKENS=3 RATELIMIT_TRUSTFORWARDEDFOR=true ./mvnw spring-boot:run
 ```
 
-The application uses `AtomicTokenBucketLimiter`. To run another implementation,
-change the `rateLimiter` bean in `RateLimitConfig`.
+The `observability` profile (`application-observability.properties`) sets a
+20-token / 10-second quota, trusts `X-Forwarded-For`, and enables CORS for
+local pages:
+
+```sh
+./mvnw spring-boot:run -Dspring-boot.run.profiles=observability
+```
+
+`rate-limit.algorithm` selects the limiter at startup; the synchronized token
+bucket is kept for tests and comparison only.
 
 ## HTTP behavior
 
@@ -252,6 +323,23 @@ Content-Type: application/problem+json
 
 `Retry-After` tells well-behaved clients when to try again, and
 `Cache-Control: no-store` stops caches from replaying the rejection.
+
+### CORS
+
+CORS is off by default. When `cors.allowed-origins` lists origins (Spring origin
+patterns such as `http://localhost:[*]`, or `null` for pages opened from disk),
+a `CorsFilter` serves `/api/*` for those origins:
+
+- **Allowed:** method `GET`, and request headers `X-API-Key` and `X-Forwarded-For`.
+- **Exposed to scripts:** `RateLimit`, `RateLimit-Policy` and `Retry-After`. Browsers
+  hide non-standard response headers otherwise.
+- **Preflight cache:** one hour, so browsers do not preflight every request.
+
+The CORS filter runs **before** the rate limit filter. Preflight requests are
+answered by the CORS filter and never consume tokens; requests from origins that
+are not allowed get `403` without consuming tokens; and the `429` responses
+written by the rate limit filter still carry CORS headers, so a page can read
+them.
 
 ## Client identification
 
@@ -346,6 +434,15 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'X-Forwarded-For: 198.51.100.1, 203.
 # 429
 ```
 
+## Observability page
+
+`observability/index.html` is a live dashboard. It simulates up to eight
+clients with different identities and traffic patterns (steady, random, burst,
+ramp, continuous spam, and a client that honors `Retry-After`). It animates
+each request through the filter and charts what passes and what is blocked.
+Start the application with the `observability` profile and open the file in a
+browser; see [`observability/README.md`](observability/README.md).
+
 ## Testing
 
 ```sh
@@ -356,11 +453,15 @@ curl -s -o /dev/null -w '%{http_code}\n' -H 'X-Forwarded-For: 198.51.100.1, 203.
 |---|---|
 | `RateLimiterContractTests` | Shared behavior, run against **all three** limiters: full start, exhaustion, weighted costs, refill boundaries, refill cap after idle periods, clock moving backward, invalid input, per-outcome metrics, and concurrency (one shared client, many clients, weighted costs) |
 | `AtomicTokenBucketLimiterTests` | Nanosecond refill boundary, fractional refill intervals, largest configuration without overflow, requests racing refills, observed CAS retries |
+| `RingBufferTests` | Empty and full states, FIFO order, wrap-around, rejection when full, and 10,000 random operations checked against `ArrayDeque` |
+| `LeakyBucketQueueTests` | First request passes at once, a burst leaves one per interval in arrival order, full bucket rejects with time to next leak, drained bucket passes again, late timers keep the interval, separate clients, metrics (deterministic clock and scheduler) |
+| `LeakyBucketQueueHttpTests` | Real server: a burst of 6 against capacity 4 gives 2 immediate 429s and 4 responses released about 250 ms apart, on a server with only two threads |
 | `LeakyBucketLimiterTests` | Continuous draining, nanosecond drain boundary, fractional intervals, overflow safety, decision-by-decision equivalence with the atomic token bucket, observed CAS retries |
 | `SynchronizedTokenBucketLimiterTests` | The shared contract |
 | `RateLimitFilterTests` | Quota headers, the 429 problem response, per-client and per-API-key isolation, ignored `X-Forwarded-For`, `/api/*` scope, metrics wiring |
 | `ClientKeyResolverTests` | Source priority, SHA-256 hashing, blank values, forwarded-header trust boundary and last-entry selection |
 | `RateLimitMetricsTests` | Counting by outcome, no lost increments under concurrency |
+| `CorsTests` | Preflights consume no tokens, quota headers are exposed on 200 and 429, pages opened from disk are allowed, unknown origins are refused without consuming tokens, CORS is off by default |
 | `RateLimitContractTests` | Configuration binding and validation, decision invariants |
 | `DemoControllerTests`, `ApplicationTests` | Endpoint and application startup |
 
@@ -384,3 +485,8 @@ double-spent token fails the test.
 - **One policy.** Every `/api/*` request costs one token from the same quota;
   there are no per-endpoint limits or weights over HTTP.
 - **Metrics are internal.** Counters are not exported to a monitoring system.
+- **Queued requests hold connections.** The leaky bucket queue keeps each
+  waiting request's connection open for up to one window. Waiting requests use
+  no server threads, but every client can hold up to `capacity` open
+  connections, and a queued request whose client disconnects still occupies its
+  place until it leaks.

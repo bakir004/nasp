@@ -1,0 +1,1568 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rate Limiter Observability</title>
+<style>
+:root {
+  color-scheme: light;
+  --page: #f9f9f7;
+  --surface: #fcfcfb;
+  --surface-2: #f3f2ef;
+  --ink-1: #0b0b0b;
+  --ink-2: #52514e;
+  --muted: #898781;
+  --grid: #e1e0d9;
+  --axis: #c3c2b7;
+  --border: rgba(11, 11, 11, 0.10);
+  --good: #0ca30c;
+  --good-ink: #006300;
+  --critical: #d03b3b;
+  --warning: #fab219;
+  --accent: #2a78d6;
+  --s1: #2a78d6; --s2: #eb6834; --s3: #1baf7a; --s4: #eda100;
+  --s5: #e87ba4; --s6: #008300; --s7: #6250d6; --s8: #e34948;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --page: #0d0d0d;
+    --surface: #1a1a19;
+    --surface-2: #232321;
+    --ink-1: #f0efec;
+    --ink-2: #c3c2b7;
+    --muted: #898781;
+    --grid: #2c2c2a;
+    --axis: #383835;
+    --border: rgba(255, 255, 255, 0.10);
+    --good-ink: #0ca30c;
+    --accent: #3987e5;
+    --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+    --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --page: #0d0d0d;
+  --surface: #1a1a19;
+  --surface-2: #232321;
+  --ink-1: #f0efec;
+  --ink-2: #c3c2b7;
+  --muted: #898781;
+  --grid: #2c2c2a;
+  --axis: #383835;
+  --border: rgba(255, 255, 255, 0.10);
+  --good-ink: #0ca30c;
+  --accent: #3987e5;
+  --s1: #3987e5; --s2: #d95926; --s3: #199e70; --s4: #c98500;
+  --s5: #d55181; --s6: #008300; --s7: #9085e9; --s8: #e66767;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { margin: 0; }
+body {
+  background: var(--page);
+  color: var(--ink-1);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+main { max-width: 1280px; margin: 0 auto; padding: 20px 16px 48px; }
+h1 { font-size: 20px; margin: 0; letter-spacing: -0.01em; }
+h2 { font-size: 14px; margin: 0; }
+p { margin: 0; }
+code { font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace; }
+button, select, input {
+  font: inherit; color: var(--ink-1); background: var(--surface);
+  border: 1px solid var(--border); border-radius: 8px;
+}
+button { padding: 6px 12px; cursor: pointer; }
+button:hover { background: var(--surface-2); }
+button.primary { background: var(--accent); border-color: transparent; color: #fff; }
+button.primary:hover { filter: brightness(1.08); }
+button.ghost { background: transparent; }
+select, input { padding: 5px 8px; }
+input[type=number] { width: 76px; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.top { display: flex; flex-wrap: wrap; gap: 12px 24px; align-items: flex-end; justify-content: space-between; margin-bottom: 16px; }
+.sub { color: var(--ink-2); margin-top: 2px; }
+.status { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
+  border-radius: 999px; background: var(--surface); border: 1px solid var(--border);
+  color: var(--ink-2); font-size: 13px; white-space: nowrap;
+}
+.pill .icon { font-weight: 700; }
+.pill.good .icon { color: var(--good); }
+.pill.bad .icon { color: var(--critical); }
+.pill.warn .icon { color: var(--warning); }
+.api-field input {
+  width: 170px; padding: 0 2px; border: 0; background: transparent; color: var(--ink-1);
+  font: 12.5px ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.banner {
+  display: flex; gap: 10px; align-items: flex-start; padding: 10px 14px; margin-bottom: 16px;
+  border-radius: 10px; background: var(--surface); border: 1px solid var(--border);
+  border-left: 4px solid var(--warning); color: var(--ink-1);
+}
+.banner.bad { border-left-color: var(--critical); }
+.banner .icon { font-weight: 700; }
+
+.toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-bottom: 16px; }
+.toolbar .spacer { flex: 1; }
+
+.tiles { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; margin-bottom: 12px; }
+.tile { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 8px 12px; }
+.tile .label { color: var(--ink-2); font-size: 12px; display: flex; gap: 6px; align-items: center; }
+.tile .value { font-size: 20px; font-weight: 600; letter-spacing: -0.01em; line-height: 1.3; }
+.tile .note { color: var(--muted); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+.seg { display: inline-flex; padding: 2px; border-radius: 10px; background: var(--surface-2); border: 1px solid var(--border); }
+.seg button { border: 0; background: transparent; border-radius: 8px; padding: 5px 12px; color: var(--ink-2); }
+.seg button[aria-checked="true"] { background: var(--surface); color: var(--ink-1); font-weight: 600; box-shadow: 0 1px 3px rgba(0, 0, 0, 0.15); }
+
+.main-grid { display: grid; grid-template-columns: minmax(0, 1fr) 420px; gap: 16px; align-items: start; }
+.main-grid .panel { margin-bottom: 16px; }
+.mark-good { color: var(--good); font-weight: 700; }
+.mark-bad { color: var(--critical); font-weight: 700; }
+
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px 16px; margin-bottom: 16px; min-width: 0; }
+.panel-head { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; justify-content: space-between; margin-bottom: 10px; }
+.panel-head p { color: var(--ink-2); font-size: 12.5px; }
+.grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; }
+.grid2 .panel { margin-bottom: 16px; }
+canvas { display: block; width: 100%; }
+
+.legend { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--ink-2); font-size: 12.5px; margin-bottom: 8px; }
+.legend span { display: inline-flex; align-items: center; gap: 6px; }
+.swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; flex: none; }
+.dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; flex: none; }
+
+.clients { display: grid; gap: 8px; max-height: 560px; overflow-y: auto; padding-right: 2px; }
+.card { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; background: var(--surface); display: grid; gap: 6px; }
+.card.running { box-shadow: inset 3px 0 0 var(--accent); }
+.card-row { display: flex; gap: 6px; align-items: center; min-width: 0; }
+.card-row input.name { flex: 1; min-width: 60px; font-weight: 600; border-color: transparent; background: transparent; padding: 3px 4px; }
+.card-row input.name:hover, .card-row input.name:focus { border-color: var(--border); }
+.card-row select, .card-row input, .card-row button { padding: 3px 7px; font-size: 13px; }
+.card-row .mode { max-width: 150px; }
+.card-row .toggle { min-width: 34px; }
+.params { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.params label { display: inline-flex; gap: 4px; align-items: center; color: var(--ink-2); font-size: 12px; }
+.params input[type=number] { width: 62px; }
+.stats { margin-left: auto; display: inline-flex; gap: 10px; font-size: 12px; color: var(--ink-2); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.stats b { color: var(--ink-1); font-weight: 600; }
+.gauge-row { display: flex; gap: 8px; align-items: center; font-size: 11.5px; color: var(--ink-2); }
+.gauge { flex: 1; height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
+.gauge > div { height: 100%; border-radius: 3px; transition: width 0.2s linear; }
+.gauge-text { min-width: 132px; text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.more { display: grid; gap: 6px; padding-top: 6px; border-top: 1px solid var(--grid); }
+.more .identity { flex: 1; min-width: 0; font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.hint { color: var(--muted); font-size: 12px; }
+.row { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; }
+.row label { display: inline-flex; gap: 6px; align-items: center; color: var(--ink-2); font-size: 12.5px; }
+.add-row { display: flex; gap: 6px; align-items: center; border: 1px dashed var(--axis); border-radius: 10px; padding: 8px 10px; }
+.add-row select { flex: 1; min-width: 0; padding: 3px 7px; font-size: 13px; }
+.add-row button { padding: 3px 10px; font-size: 13px; }
+
+.table-wrap { max-height: 360px; overflow: auto; border-top: 1px solid var(--grid); }
+table { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--surface); color: var(--ink-2); font-weight: 600; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; }
+td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; color: var(--ink-2); }
+.result-ok { color: var(--good-ink); font-weight: 600; }
+.result-bad { color: var(--critical); font-weight: 600; }
+.result-err { color: var(--muted); font-weight: 600; }
+
+.tip {
+  position: fixed; z-index: 10; pointer-events: none; min-width: 140px; max-width: 280px;
+  background: var(--surface); color: var(--ink-1); border: 1px solid var(--border);
+  border-radius: 8px; padding: 8px 10px; font-size: 12.5px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.18);
+}
+.tip .t-head { color: var(--ink-2); margin-bottom: 4px; }
+.tip .t-row { display: flex; gap: 8px; align-items: center; justify-content: space-between; }
+.tip .t-row span:first-child { display: inline-flex; gap: 6px; align-items: center; }
+.tip b { font-variant-numeric: tabular-nums; }
+
+@media (max-width: 1100px) {
+  .main-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .clients { max-height: none; }
+}
+@media (max-width: 960px) {
+  .tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .grid2 { grid-template-columns: minmax(0, 1fr); gap: 0; }
+}
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <div>
+      <h1>Rate limiter observability</h1>
+      <p class="sub">Simulated clients calling <code>GET /api/hello</code> through <code>RateLimitFilter</code></p>
+    </div>
+    <div class="status">
+      <span id="conn" class="pill"><span class="icon">…</span><span class="text">Connecting</span></span>
+      <span id="policy" class="pill"><span class="text">Policy unknown</span></span>
+      <span id="trust" class="pill"><span class="icon">…</span><span class="text">IP mode unknown</span></span>
+      <span id="conns" class="pill" title="Browsers allow six open connections per host name; each client uses four *.localhost names when the browser supports them."><span class="icon">…</span><span class="text">Connections unknown</span></span>
+      <label class="pill api-field">API <input id="apiBase" spellcheck="false" aria-label="Application base URL"></label>
+      <button id="recheck" class="ghost" type="button">Re-check</button>
+      <button id="theme" class="ghost" type="button" aria-label="Toggle light and dark theme">◐ Theme</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" hidden></div>
+
+  <div class="toolbar">
+    <div class="seg" role="radiogroup" aria-label="Rate limiting algorithm">
+      <button type="button" role="radio" data-algo="token">Token bucket</button>
+      <button type="button" role="radio" data-algo="leaky">Leaky bucket</button>
+    </div>
+    <button id="startAll" class="primary" type="button">▶ Start all</button>
+    <button id="stopAll" type="button">■ Stop all</button>
+    <button id="clear" type="button">Clear data</button>
+    <span class="spacer"></span>
+    <span class="hint" id="algoHint"></span>
+  </div>
+
+  <section class="tiles" aria-label="Totals">
+    <div class="tile"><div class="label">Requests sent</div><div class="value" id="tSent">0</div><div class="note" id="tSentNote">no errors</div></div>
+    <div class="tile"><div class="label"><span class="mark-good">✓</span> Passed (200)</div><div class="value" id="tOk">0</div><div class="note">reached the controller</div></div>
+    <div class="tile"><div class="label"><span class="mark-bad">✕</span> Blocked (429)</div><div class="value" id="tBlocked">0</div><div class="note">stopped by the filter</div></div>
+    <div class="tile"><div class="label">Block rate</div><div class="value" id="tRate">–</div><div class="note">of answered requests</div></div>
+    <div class="tile"><div class="label">Throughput</div><div class="value" id="tTput">0</div><div class="note" id="tTputNote">req/s, last 5 s</div></div>
+    <div class="tile"><div class="label">Wait (passed)</div><div class="value" id="tWait">–</div><div class="note" id="tWaitNote">median, last 5 s</div></div>
+  </section>
+
+  <div class="main-grid">
+    <section class="panel" id="flowPanel">
+      <div class="panel-head">
+        <h2>Request flow</h2>
+        <p>Requests drop into their client's bucket and leak out to the endpoint; a full bucket spills them as <span class="mark-bad">✕</span>.</p>
+      </div>
+      <canvas id="flow" aria-label="Animated request flow from clients through the rate limit filter to the endpoint"></canvas>
+    </section>
+    <section class="panel" id="clientsPanel">
+      <div class="panel-head"><h2>Clients</h2><p>Up to 8. ⋯ edits identity.</p></div>
+      <div class="clients" id="clients"></div>
+    </section>
+  </div>
+
+  <div class="grid2">
+    <section class="panel">
+      <div class="panel-head"><h2>Throughput per second</h2><p>Last 60 s, all clients</p></div>
+      <div class="legend">
+        <span><i class="swatch" style="background:var(--good)"></i><span class="mark-good">✓</span> Passed</span>
+        <span><i class="swatch" style="background:var(--critical)"></i><span class="mark-bad">✕</span> Blocked</span>
+      </div>
+      <canvas id="throughput" aria-label="Stacked bars of passed and blocked requests per second"></canvas>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><h2 id="bucketTitle">Tokens remaining</h2><p id="bucketNote"></p></div>
+      <div class="legend" id="tokenLegend"></div>
+      <canvas id="tokens" aria-label="Bucket state per client over time"></canvas>
+    </section>
+  </div>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Request timeline</h2>
+      <p>Last 30 s, one lane per client. Ticks above the lane passed, ticks below were blocked.</p>
+    </div>
+    <div class="legend">
+      <span><i class="swatch" style="background:var(--good)"></i>▲ Passed (upper half)</span>
+      <span><i class="swatch" style="background:var(--critical)"></i>▼ Blocked (lower half)</span>
+      <span><i class="swatch" style="background:var(--muted)"></i>● Error</span>
+      <span><i class="swatch" style="background:var(--accent)"></i>│ Algorithm switched</span>
+    </div>
+    <canvas id="timeline" aria-label="Per-client timeline of passed and blocked requests"></canvas>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>Request log</h2>
+      <div class="row">
+        <label>Show
+          <select id="logFilter">
+            <option value="all">All</option>
+            <option value="ok">Passed</option>
+            <option value="blocked">Blocked</option>
+            <option value="error">Errors</option>
+          </select>
+        </label>
+        <label><input type="checkbox" id="logPause"> Pause</label>
+      </div>
+    </div>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Time</th><th>Client</th><th>Identity</th><th>Result</th><th class="num">Remaining</th><th class="num">Retry-After</th><th class="num">Latency</th></tr></thead>
+        <tbody id="log"></tbody>
+      </table>
+    </div>
+  </section>
+</main>
+<div id="tip" class="tip" hidden></div>
+
+<script>
+'use strict';
+
+// ---------- Configuration ----------
+
+const MAX_CLIENTS = 8;
+const CHART_WINDOW_MS = 60_000;
+const TIMELINE_WINDOW_MS = 30_000;
+const KEEP_MS = 65_000;
+const MAX_INFLIGHT = 64;
+
+const MODES = {
+  steady:  { label: 'Steady',                     params: ['rate'],               hint: 'Fixed interval between requests.' },
+  poisson: { label: 'Random (Poisson)',           params: ['rate'],               hint: 'Random gaps with the same average rate.' },
+  burst:   { label: 'Burst',                      params: ['size', 'every'],      hint: 'Many requests at once, then quiet.' },
+  ramp:    { label: 'Ramp',                       params: ['from', 'to', 'period'], hint: 'Rate climbs linearly, then restarts.' },
+  flood:   { label: 'Flood',                      params: ['rate'],               hint: 'Fixed high rate without waiting for answers, like an abusive client.' },
+  spam:    { label: 'Continuous spam',            params: ['workers'],            hint: 'Each parallel worker sends again as soon as its answer arrives.' },
+  polite:  { label: 'Polite (honors Retry-After)', params: ['rate'],              hint: 'After a 429, waits Retry-After seconds.' },
+};
+const PARAMS = {
+  rate:    { label: 'req/s',     min: 0.1, max: 200, step: 0.1, value: 2 },
+  size:    { label: 'size',      min: 1,   max: 500, step: 1,   value: 20 },
+  every:   { label: 'every s',   min: 0.5, max: 300, step: 0.5, value: 10 },
+  from:    { label: 'from req/s', min: 0.1, max: 200, step: 0.1, value: 0.5 },
+  to:      { label: 'to req/s',  min: 0.1, max: 200, step: 0.1, value: 6 },
+  period:  { label: 'period s',  min: 2,   max: 600, step: 1,   value: 30 },
+  workers: { label: 'parallel',  min: 1,   max: 24,  step: 1,   value: 2 },
+};
+const PRESETS = [
+  { name: 'Alice',         kind: 'ip',  mode: 'steady',  params: { rate: 1 } },
+  { name: 'Spammer',       kind: 'ip',  mode: 'flood',   params: { rate: 20 } },
+  { name: 'Burst bot',     kind: 'key', mode: 'burst',   params: { size: 30, every: 15 } },
+  { name: 'Polite client', kind: 'ip',  mode: 'polite',  params: { rate: 5 } },
+  { name: 'Mobile app',    kind: 'key', mode: 'poisson', params: { rate: 2 } },
+  { name: 'Crawler',       kind: 'ip',  mode: 'ramp',    params: { from: 0.5, to: 8, period: 30 } },
+];
+
+// ---------- State ----------
+
+const state = {
+  policy: { q: null, w: null },
+  algo: 'token',            // which application the page talks to
+  backends: { token: 'http://localhost:8080', leaky: 'http://localhost:8081' },
+  switches: [],             // { at, algo } markers drawn on the charts
+  conn: 'unknown',          // 'ok' | 'down' | 'unknown'
+  trust: 'unknown',         // 'on' | 'off' | 'unknown'
+  clients: [],
+  events: [],               // recent answered requests, oldest first
+  totals: { sent: 0, ok: 0, blocked: 0, errors: 0 },
+  gate: { okFlash: -1e9, badFlash: -1e9, endpointFlash: -1e9 },
+  particles: [],
+  sharding: false,          // whether *.localhost host names reach the application
+};
+
+// Browsers open at most six connections per host. Queued requests keep theirs open while they
+// wait, so each client spreads its requests over several *.localhost names, which browsers
+// resolve to this machine. That lets a client have enough requests in flight to fill its bucket.
+const SHARDS = 8;
+function requestUrl(client) {
+  const url = new URL(apiBase());
+  if (state.sharding && client && url.hostname === 'localhost') {
+    url.hostname = `c${client.slot + 1}${'abcdefgh'[client.seq++ % SHARDS]}.localhost`;
+  }
+  return url.origin + '/api/hello';
+}
+let nextClientId = 1;
+
+const $ = id => document.getElementById(id);
+const apiBase = () => state.backends[state.algo];
+const ALGOS = {
+  token: {
+    label: 'Token bucket',
+    hint: 'Each client starts with a full bucket of tokens; a request spends one, and tokens refill at the policy rate.',
+    title: 'Tokens remaining',
+    note: 'From the RateLimit header; refill modeled between responses',
+    start: '-Dspring-boot.run.profiles=observability',
+  },
+  leaky: {
+    label: 'Leaky bucket',
+    hint: 'Requests wait in each client\'s bucket (a ring buffer) and leak out one at a time at the policy rate. Bursts are delayed, not passed at once; only a full bucket rejects.',
+    title: 'Requests waiting in bucket',
+    note: 'Sampled live from each client\'s unanswered requests',
+    start: '-Dspring-boot.run.profiles=observability -Dspring-boot.run.arguments="--server.port=8081 --rate-limit.algorithm=leaky-bucket-queue"',
+  },
+};
+const now = () => performance.now();
+const rand = (lo, hi) => lo + Math.floor(Math.random() * (hi - lo + 1));
+
+// Documentation address ranges (RFC 5737), never routed on the internet.
+function randomIp() {
+  const nets = ['192.0.2', '198.51.100', '203.0.113'];
+  return `${nets[rand(0, nets.length - 1)]}.${rand(1, 254)}`;
+}
+function randomKey() {
+  return 'key-' + Array.from(crypto.getRandomValues(new Uint8Array(4)), b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// ---------- Talking to the API ----------
+
+function parseRateLimit(res) {
+  const out = { r: null, t: null, q: null, w: null };
+  const limit = res.headers.get('RateLimit');
+  const policy = res.headers.get('RateLimit-Policy');
+  if (limit) {
+    const r = /;\s*r=(\d+)/.exec(limit); if (r) out.r = +r[1];
+    const t = /;\s*t=(\d+)/.exec(limit); if (t) out.t = +t[1];
+  }
+  if (policy) {
+    const q = /;\s*q=(\d+)/.exec(policy); if (q) out.q = +q[1];
+    const w = /;\s*w=(\d+)/.exec(policy); if (w) out.w = +w[1];
+  }
+  return out;
+}
+
+async function call(headers, url = requestUrl(null)) {
+  const started = now();
+  try {
+    const res = await fetch(url, { headers, cache: 'no-store', mode: 'cors' });
+    await res.text();
+    const rl = parseRateLimit(res);
+    if (rl.q && rl.w) state.policy = { q: rl.q, w: rl.w };
+    return { status: res.status, ...rl, latency: now() - started };
+  } catch {
+    return { status: 0, r: null, t: null, latency: now() - started };
+  }
+}
+
+// A network failure and a CORS refusal look identical to the page: both reject the fetch.
+function noteConnection(status) {
+  const next = status === 0 ? 'down' : 'ok';
+  if (next !== state.conn) { state.conn = next; renderStatus(); }
+}
+
+async function send(client) {
+  client.inflight++;
+  client.stats.sent++;
+  state.totals.sent++;
+  const algo = state.algo;
+  const particle = spawnParticle(client);
+  const res = await call(client.kind === 'ip' ? { 'X-Forwarded-For': client.identity } : { 'X-API-Key': client.identity },
+      requestUrl(client));
+  client.inflight--;
+  noteConnection(res.status);
+
+  const at = now();
+  const kind = res.status === 200 ? 'ok' : res.status === 429 ? 'blocked' : 'error';
+  const event = {
+    at, wall: new Date(), cid: client.id, kind, status: res.status,
+    r: res.r, retry: res.t, latency: res.latency, identity: client.identity,
+  };
+  state.events.push(event);
+  if (kind === 'ok') { client.stats.ok++; state.totals.ok++; }
+  else if (kind === 'blocked') { client.stats.blocked++; state.totals.blocked++; }
+  else { client.stats.errors++; state.totals.errors++; }
+
+  if (res.r != null && algo === state.algo && algo === 'token') {
+    client.obs.push({ at, r: res.r });
+    client.last = { r: res.r, retry: res.t, at };
+  }
+  if (kind === 'blocked' && client.mode === 'polite' && res.t != null) {
+    client.pausedUntil = Math.max(client.pausedUntil, at + res.t * 1000);
+  }
+  if (particle) {
+    if (kind === 'error') {
+      const i = state.particles.indexOf(particle);
+      if (i >= 0) state.particles.splice(i, 1);
+    } else {
+      particle.resolved = { at, ok: kind === 'ok' };
+    }
+  }
+  return kind;
+}
+
+// Two fresh simulated addresses reveal whether X-Forwarded-For is trusted: if it is, each
+// lands in a new bucket (r = q - 1); if not, both share this machine's bucket.
+async function probe() {
+  const a = await call({ 'X-Forwarded-For': `198.18.${rand(0, 255)}.${rand(1, 254)}` });
+  noteConnection(a.status);
+  if (a.status !== 200 && a.status !== 429) { state.trust = 'unknown'; renderStatus(); return; }
+  const b = await call({ 'X-Forwarded-For': `198.18.${rand(0, 255)}.${rand(1, 254)}` });
+  const q = state.policy.q;
+  state.trust = (a.r === q - 1 && b.r === q - 1) ? 'on' : 'off';
+  // Can this browser reach the application through a *.localhost name?
+  const url = new URL(apiBase());
+  state.sharding = false;
+  if (url.hostname === 'localhost') {
+    url.hostname = 'probe.localhost';
+    const c = await call({ 'X-API-Key': 'observability-probe' }, url.origin + '/api/hello');
+    state.sharding = c.status === 200 || c.status === 429;
+  }
+  renderStatus();
+}
+
+// ---------- Traffic generation ----------
+
+function rateAt(client, at) {
+  const p = client.params;
+  if (client.mode === 'ramp') {
+    const span = p.period * 1000;
+    const phase = ((at - client.startedAt) % span) / span;
+    return p.from + (p.to - p.from) * phase;
+  }
+  return p.rate;
+}
+
+function fire(client) {
+  const p = client.params;
+  if (client.inflight >= MAX_INFLIGHT) return;   // application too slow; skip, don't pile up
+  if (client.mode === 'burst') {
+    for (let i = 0; i < p.size; i++) send(client);
+  } else {
+    send(client);
+  }
+}
+
+function scheduleNext(client) {
+  const p = client.params;
+  switch (client.mode) {
+    case 'burst':   client.nextAt += p.every * 1000; break;
+    case 'poisson': client.nextAt += -Math.log(1 - Math.random()) * 1000 / p.rate; break;
+    default:        client.nextAt += 1000 / Math.max(0.01, rateAt(client, client.nextAt));
+  }
+}
+
+function tick() {
+  const t = now();
+  for (const c of state.clients) {
+    if (!c.running || c.mode === 'spam') continue;
+    if (t - c.nextAt > 2000) c.nextAt = t;      // the tab was in the background; don't replay
+    for (let guard = 0; t >= c.nextAt && guard < 200; guard++) {
+      if (c.mode === 'polite' && c.nextAt < c.pausedUntil) { c.nextAt = c.pausedUntil; continue; }
+      fire(c);
+      scheduleNext(c);
+    }
+  }
+}
+
+async function spamWorker(client, runId) {
+  while (client.running && client.runId === runId) {
+    const kind = await send(client);
+    if (kind === 'error') await new Promise(r => setTimeout(r, 500));
+  }
+}
+
+function start(client) {
+  if (client.running) return;
+  client.running = true;
+  client.runId++;
+  client.startedAt = client.nextAt = now();
+  client.pausedUntil = 0;
+  if (client.mode === 'spam') {
+    for (let i = 0; i < client.params.workers; i++) spamWorker(client, client.runId);
+  }
+  renderCard(client);
+}
+
+function stop(client) {
+  client.running = false;
+  client.runId++;
+  renderCard(client);
+}
+
+function restartIfRunning(client) {
+  if (client.running) { stop(client); start(client); }
+}
+
+// ---------- Clients ----------
+
+function addClient(preset) {
+  if (state.clients.length >= MAX_CLIENTS) return;
+  const used = new Set(state.clients.map(c => c.slot));
+  const slot = [...Array(MAX_CLIENTS).keys()].find(i => !used.has(i));
+  const params = {};
+  for (const [key, def] of Object.entries(PARAMS)) params[key] = preset.params?.[key] ?? def.value;
+  const client = {
+    id: nextClientId++, slot, name: preset.name, kind: preset.kind, mode: preset.mode, params,
+    identity: preset.kind === 'ip' ? randomIp() : randomKey(),
+    running: false, runId: 0, nextAt: 0, startedAt: 0, pausedUntil: 0, inflight: 0, seq: 0, fill: [],
+    stats: { sent: 0, ok: 0, blocked: 0, errors: 0 }, obs: [], last: null, el: null,
+  };
+  state.clients.push(client);
+  buildCard(client);
+  renderClients();
+}
+
+function removeClient(client) {
+  stop(client);
+  state.clients = state.clients.filter(c => c !== client);
+  state.particles = state.particles.filter(p => p.cid !== client.id);
+  renderClients();
+}
+
+function clientById(id) { return state.clients.find(c => c.id === id); }
+
+// ---------- Colors ----------
+
+let C = {};
+function readColors() {
+  const s = getComputedStyle(document.documentElement);
+  const v = name => s.getPropertyValue(name).trim();
+  C = {
+    surface: v('--surface'), surface2: v('--surface-2'), ink1: v('--ink-1'), ink2: v('--ink-2'),
+    muted: v('--muted'), grid: v('--grid'), axis: v('--axis'), good: v('--good'),
+    critical: v('--critical'), accent: v('--accent'),
+    series: [1, 2, 3, 4, 5, 6, 7, 8].map(i => v('--s' + i)),
+  };
+}
+const seriesVar = slot => `var(--s${slot + 1})`;
+
+// ---------- Client cards ----------
+
+function buildCard(client) {
+  const el = document.createElement('div');
+  el.className = 'card';
+  el.innerHTML = `
+    <div class="card-row">
+      <i class="dot" style="background:${seriesVar(client.slot)}"></i>
+      <input class="name" aria-label="Client name" maxlength="24">
+      <select class="mode" aria-label="Traffic mode">
+        ${Object.entries(MODES).map(([k, m]) => `<option value="${k}" title="${m.hint}">${m.label}</option>`).join('')}
+      </select>
+      <button class="toggle" type="button"></button>
+      <button class="ghost more-toggle" type="button" aria-label="Identity settings" aria-expanded="false">⋯</button>
+    </div>
+    <div class="card-row">
+      <span class="params"></span>
+      <span class="stats" aria-label="Requests sent, passed, blocked">
+        <span>sent <b class="c-sent">0</b></span>
+        <span><span class="mark-good">✓</span> <b class="c-ok">0</b></span>
+        <span><span class="mark-bad">✕</span> <b class="c-blocked">0</b></span>
+      </span>
+    </div>
+    <div class="gauge-row">
+      <div class="gauge"><div style="width:0%;background:${seriesVar(client.slot)}"></div></div>
+      <span class="gauge-text">–</span>
+    </div>
+    <div class="more" hidden>
+      <div class="card-row">
+        <select class="kind" aria-label="Identity type">
+          <option value="ip">IP address</option>
+          <option value="key">API key</option>
+        </select>
+        <input class="identity" aria-label="Identity value" spellcheck="false">
+      </div>
+      <div class="card-row">
+        <button class="newid" type="button">New identity</button>
+        <button class="remove" type="button">Remove client</button>
+        <span class="hint mode-hint"></span>
+      </div>
+    </div>`;
+  client.el = el;
+
+  const q = sel => el.querySelector(sel);
+  q('.name').value = client.name;
+  q('.kind').value = client.kind;
+  q('.identity').value = client.identity;
+  q('.mode').value = client.mode;
+
+  const resetBucketView = () => { client.obs = []; client.last = null; client.pausedUntil = 0; };
+  q('.name').addEventListener('input', e => { client.name = e.target.value || 'Client'; renderTokenLegend(); });
+  q('.kind').addEventListener('change', e => {
+    client.kind = e.target.value;
+    client.identity = client.kind === 'ip' ? randomIp() : randomKey();
+    q('.identity').value = client.identity;
+    resetBucketView();
+  });
+  q('.identity').addEventListener('change', e => {
+    client.identity = e.target.value.trim() || client.identity;
+    e.target.value = client.identity;
+    resetBucketView();
+  });
+  q('.mode').addEventListener('change', e => {
+    const wasRunning = client.running;
+    stop(client);
+    client.mode = e.target.value;
+    buildParams(client);
+    if (wasRunning) start(client);
+  });
+  q('.toggle').addEventListener('click', () => client.running ? stop(client) : start(client));
+  q('.more-toggle').addEventListener('click', e => {
+    const more = q('.more');
+    more.hidden = !more.hidden;
+    e.currentTarget.setAttribute('aria-expanded', String(!more.hidden));
+  });
+  q('.newid').addEventListener('click', () => {
+    client.identity = client.kind === 'ip' ? randomIp() : randomKey();
+    q('.identity').value = client.identity;
+    resetBucketView();
+  });
+  q('.remove').addEventListener('click', () => removeClient(client));
+  buildParams(client);
+  renderCard(client);
+}
+
+function buildParams(client) {
+  const box = client.el.querySelector('.params');
+  box.innerHTML = '';
+  for (const key of MODES[client.mode].params) {
+    const def = PARAMS[key];
+    const label = document.createElement('label');
+    const input = document.createElement('input');
+    Object.assign(input, { type: 'number', min: def.min, max: def.max, step: def.step, value: client.params[key] });
+    input.setAttribute('aria-label', def.label);
+    input.addEventListener('change', () => {
+      const value = Math.min(def.max, Math.max(def.min, Number(input.value) || def.value));
+      input.value = client.params[key] = value;
+      if (key === 'workers') restartIfRunning(client);
+    });
+    label.append(input, def.label);
+    box.append(label);
+  }
+  client.el.querySelector('.mode').title = MODES[client.mode].hint;
+  client.el.querySelector('.mode-hint').textContent = MODES[client.mode].hint;
+}
+
+function renderCard(client) {
+  const el = client.el;
+  if (!el) return;
+  el.classList.toggle('running', client.running);
+  const toggle = el.querySelector('.toggle');
+  toggle.textContent = client.running ? '■' : '▶';
+  toggle.setAttribute('aria-label', client.running ? 'Stop client' : 'Start client');
+  toggle.title = client.running ? 'Stop' : 'Start';
+  toggle.classList.toggle('primary', !client.running);
+}
+
+function updateCardStats(client) {
+  const el = client.el;
+  const q = sel => el.querySelector(sel);
+  q('.c-sent').textContent = fmt(client.stats.sent);
+  q('.c-ok').textContent = fmt(client.stats.ok);
+  q('.c-blocked').textContent = fmt(client.stats.blocked);
+  const cap = state.policy.q;
+  const bar = q('.gauge > div');
+  // The token bucket shows what is left to spend; the leaky bucket shows how many requests wait.
+  const shown = state.algo === 'leaky' ? Math.min(cap ?? 0, client.inflight) : estimateTokens(client, now());
+  if (shown == null || !cap) {
+    bar.style.width = '0%';
+    q('.gauge-text').textContent = state.algo === 'leaky' ? 'waiting –' : 'tokens left –';
+    return;
+  }
+  bar.style.width = (100 * shown / cap).toFixed(1) + '%';
+  let text = state.algo === 'leaky'
+      ? `waiting ${shown} / ${cap}`
+      : `tokens left ≈ ${Math.floor(shown)} / ${cap}`;
+  const wait = client.pausedUntil - now();
+  if (client.mode === 'polite' && wait > 0) text += ` · waiting ${Math.ceil(wait / 1000)} s`;
+  q('.gauge-text').textContent = text;
+}
+
+function renderClients() {
+  const box = $('clients');
+  box.replaceChildren(...state.clients.map(c => c.el));
+  if (state.clients.length < MAX_CLIENTS) {
+    const add = document.createElement('div');
+    add.className = 'add-row';
+    add.innerHTML = `<select aria-label="Client preset">${PRESETS.map((p, i) => `<option value="${i}">${p.name}: ${MODES[p.mode].label}</option>`).join('')}</select>
+      <button type="button" class="primary">+ Add</button>
+      <span class="hint">${MAX_CLIENTS - state.clients.length} free</span>`;
+    add.querySelector('button').addEventListener('click', () => {
+      addClient(PRESETS[+add.querySelector('select').value]);
+    });
+    box.append(add);
+  }
+  renderTokenLegend();
+}
+
+function renderTokenLegend() {
+  $('tokenLegend').innerHTML = state.clients.map(c =>
+    `<span><i class="swatch" style="background:${seriesVar(c.slot)}"></i>${escapeHtml(c.name)}</span>`).join('');
+}
+
+// ---------- Token model ----------
+
+// Between responses the bucket refills at q / w tokens per second, exactly as the limiter does.
+function refillPerMs() { return state.policy.q / (state.policy.w * 1000); }
+
+function estimateTokens(client, at) {
+  const cap = state.policy.q;
+  if (!client.last || !cap) return null;
+  return Math.min(cap, client.last.r + (at - client.last.at) * refillPerMs());
+}
+
+function tokenPath(client, from, to) {
+  const cap = state.policy.q, rate = refillPerMs();
+  const obs = client.obs;
+  const pts = [];
+  for (let i = 0; i < obs.length; i++) {
+    const o = obs[i];
+    const end = i + 1 < obs.length ? obs[i + 1].at : to;
+    if (end < from) continue;
+    pts.push([o.at, o.r]);
+    const full = o.at + (cap - o.r) / rate;
+    if (full < end) { pts.push([full, cap]); pts.push([end, cap]); }
+    else pts.push([end, o.r + (end - o.at) * rate]);
+  }
+  return pts;
+}
+
+// The bucket chart plots tokens left (token bucket) or requests waiting (leaky bucket queue).
+function bucketSeries(client, from, to) {
+  if (state.algo === 'token') return tokenPath(client, from, to);
+  const pts = [];
+  for (const sample of client.fill) {
+    if (pts.length) pts.push([sample.at, pts[pts.length - 1][1]]);   // step, not slope
+    pts.push([sample.at, sample.v]);
+  }
+  return pts;
+}
+
+function bucketValueAt(client, at) {
+  if (state.algo === 'token') return tokenValueAt(client, at);
+  let value = null;
+  for (const sample of client.fill) { if (sample.at <= at) value = sample.v; else break; }
+  return value;
+}
+
+function tokenValueAt(client, at) {
+  const obs = client.obs;
+  let last = null;
+  for (const o of obs) { if (o.at <= at) last = o; else break; }
+  if (!last) return null;
+  return Math.min(state.policy.q, last.r + (at - last.at) * refillPerMs());
+}
+
+// ---------- Canvas helpers ----------
+
+function fit(canvas, height) {
+  const dpr = window.devicePixelRatio || 1;
+  const width = canvas.clientWidth;
+  canvas.style.height = height + 'px';
+  if (canvas.width !== Math.round(width * dpr) || canvas.height !== Math.round(height * dpr)) {
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  return { ctx, w: width, h: height };
+}
+
+// A round tick step giving at most five intervals up to v (1, 2, 5, 10, 20, 25, 50, ...).
+function niceStep(v) {
+  const raw = Math.max(1, v / 5);
+  const p = Math.pow(10, Math.floor(Math.log10(raw)));
+  const multiples = p >= 10 ? [1, 2, 2.5, 5, 10] : [1, 2, 5, 10];
+  return multiples.map(m => m * p).find(step => step >= raw);
+}
+
+function topRounded(ctx, x, y, w, h, r) {
+  r = Math.min(r, w / 2, h);
+  ctx.beginPath();
+  ctx.moveTo(x, y + h);
+  ctx.lineTo(x, y + r);
+  ctx.arcTo(x, y, x + r, y, r);
+  ctx.lineTo(x + w - r, y);
+  ctx.arcTo(x + w, y, x + w, y + r, r);
+  ctx.lineTo(x + w, y + h);
+  ctx.closePath();
+  ctx.fill();
+}
+
+function hline(ctx, x1, x2, y, color) {
+  ctx.strokeStyle = color; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(x1, Math.round(y) + 0.5); ctx.lineTo(x2, Math.round(y) + 0.5); ctx.stroke();
+}
+
+// A vertical line at each algorithm switch inside the plotted window, labelled with the new algorithm.
+function switchMarkers(ctx, t, windowMs, x0, x1, top, bottom) {
+  ctx.font = '11px system-ui, sans-serif'; ctx.textBaseline = 'top'; ctx.textAlign = 'left';
+  for (const s of state.switches) {
+    if (s.at < t - windowMs) continue;
+    const x = Math.round(x0 + (x1 - x0) * (1 - (t - s.at) / windowMs)) + 0.5;
+    ctx.strokeStyle = C.accent; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(x, top); ctx.lineTo(x, bottom); ctx.stroke();
+    // The label sits on a surface-colored plate so it stays legible over data.
+    const label = '→ ' + ALGOS[s.algo].label;
+    const width = ctx.measureText(label).width;
+    const lx = x + 4 + width > x1 ? x - 6 - width : x + 4;
+    ctx.fillStyle = C.surface;
+    ctx.fillRect(lx - 2, top, width + 4, 14);
+    ctx.fillStyle = C.ink2;
+    ctx.fillText(label, lx, top + 1);
+  }
+}
+
+function timeAxis(ctx, x0, x1, y, windowMs) {
+  ctx.fillStyle = C.muted; ctx.font = '11px system-ui, sans-serif'; ctx.textBaseline = 'top';
+  const seconds = windowMs / 1000;
+  const steps = seconds % 4 === 0 ? 4 : 3;   // 60 s → 15 s steps, 30 s → 10 s steps
+  for (let i = 0; i <= steps; i++) {
+    const x = x0 + (x1 - x0) * i / steps;
+    const secs = Math.round(windowMs / 1000 * (1 - i / steps));
+    ctx.textAlign = i === 0 ? 'left' : i === steps ? 'right' : 'center';
+    ctx.fillText(secs === 0 ? 'now' : `−${secs}s`, x, y);
+  }
+}
+
+// ---------- Hover ----------
+
+const hover = { canvas: null, x: 0, y: 0, cx: 0, cy: 0 };
+for (const id of ['throughput', 'tokens', 'timeline']) {
+  const cv = $(id);
+  cv.addEventListener('mousemove', e => {
+    const r = cv.getBoundingClientRect();
+    Object.assign(hover, { canvas: id, x: e.clientX - r.left, y: e.clientY - r.top, cx: e.clientX, cy: e.clientY });
+  });
+  cv.addEventListener('mouseleave', () => { hover.canvas = null; $('tip').hidden = true; });
+}
+
+function showTip(html) {
+  const tip = $('tip');
+  tip.innerHTML = html;
+  tip.hidden = false;
+  const pad = 14, w = tip.offsetWidth, h = tip.offsetHeight;
+  let x = hover.cx + pad, y = hover.cy + pad;
+  if (x + w > innerWidth - 8) x = hover.cx - w - pad;
+  if (y + h > innerHeight - 8) y = hover.cy - h - pad;
+  tip.style.left = Math.max(8, x) + 'px';
+  tip.style.top = Math.max(8, y) + 'px';
+}
+
+// ---------- Throughput chart ----------
+
+function drawThroughput(t) {
+  const { ctx, w, h } = fit($('throughput'), 220);
+  const pad = { l: 34, r: 8, t: 8, b: 22 };
+  const pw = w - pad.l - pad.r, ph = h - pad.t - pad.b;
+  const bins = 60, ok = new Array(bins).fill(0), bad = new Array(bins).fill(0);
+  const end = Math.ceil(t / 1000) * 1000;   // bins aligned to whole seconds
+  for (const e of state.events) {
+    const i = bins - 1 - Math.floor((end - e.at) / 1000);
+    if (i < 0) continue;
+    if (e.kind === 'ok') ok[i]++; else if (e.kind === 'blocked') bad[i]++;
+  }
+  const peak = Math.max(5, ...ok.map((v, i) => v + bad[i]));
+  const step = niceStep(peak);
+  const max = Math.ceil(peak / step) * step;
+  const y = v => pad.t + ph - (v / max) * ph;
+
+  ctx.font = '11px system-ui, sans-serif'; ctx.textBaseline = 'middle'; ctx.textAlign = 'right';
+  for (let v = 0; v <= max; v += step) {
+    hline(ctx, pad.l, w - pad.r, y(v), v === 0 ? C.axis : C.grid);
+    ctx.fillStyle = C.muted; ctx.fillText(String(v), pad.l - 6, y(v));
+  }
+  timeAxis(ctx, pad.l, w - pad.r, h - pad.b + 6, CHART_WINDOW_MS);
+
+  const slot = pw / bins, bw = Math.max(1, slot - 2);
+  let hoverIndex = -1;
+  if (hover.canvas === 'throughput' && hover.x >= pad.l && hover.x <= w - pad.r) {
+    hoverIndex = Math.min(bins - 1, Math.floor((hover.x - pad.l) / slot));
+  }
+  for (let i = 0; i < bins; i++) {
+    const x = pad.l + i * slot + 1;
+    const dim = hoverIndex >= 0 && i !== hoverIndex;
+    ctx.globalAlpha = dim ? 0.45 : 1;
+    const okH = (ok[i] / max) * ph, badH = (bad[i] / max) * ph;
+    const base = pad.t + ph;
+    if (ok[i] > 0) {
+      ctx.fillStyle = C.good;
+      if (bad[i] > 0) ctx.fillRect(x, base - okH, bw, okH);
+      else topRounded(ctx, x, base - okH, bw, okH, 3);
+    }
+    if (bad[i] > 0) {
+      const gap = ok[i] > 0 ? 2 : 0;
+      ctx.fillStyle = C.critical;
+      topRounded(ctx, x, base - okH - badH - gap, bw, Math.max(1, badH), 3);
+    }
+  }
+  ctx.globalAlpha = 1;
+  switchMarkers(ctx, end, CHART_WINDOW_MS, pad.l, pad.l + pw, pad.t, pad.t + ph);
+
+  if (hoverIndex >= 0) {
+    const secsAgo = bins - 1 - hoverIndex;
+    const label = secsAgo === 0 ? 'Current second (in progress)' : `${secsAgo} s ago`;
+    showTip(`<div class="t-head">${label}</div>
+      <div class="t-row"><span><i class="swatch" style="background:var(--good)"></i>✓ Passed</span><b>${ok[hoverIndex]}</b></div>
+      <div class="t-row"><span><i class="swatch" style="background:var(--critical)"></i>✕ Blocked</span><b>${bad[hoverIndex]}</b></div>`);
+  } else if (hover.canvas === 'throughput') {
+    $('tip').hidden = true;
+  }
+}
+
+// ---------- Tokens chart ----------
+
+function drawTokens(t) {
+  const clients = state.clients;
+  const directLabels = clients.length <= 4;
+  const { ctx, w, h } = fit($('tokens'), 220);
+  const pad = { l: 34, r: directLabels ? 92 : 10, t: 8, b: 22 };
+  const pw = w - pad.l - pad.r, ph = h - pad.t - pad.b;
+  const cap = state.policy.q;
+  const from = t - CHART_WINDOW_MS;
+  const x = at => pad.l + ((at - from) / CHART_WINDOW_MS) * pw;
+
+  ctx.font = '11px system-ui, sans-serif'; ctx.textBaseline = 'middle'; ctx.textAlign = 'right';
+  if (!cap) {
+    hline(ctx, pad.l, w - pad.r, pad.t + ph, C.axis);
+    ctx.fillStyle = C.muted; ctx.textAlign = 'center';
+    ctx.fillText('Waiting for the first response…', pad.l + pw / 2, pad.t + ph / 2);
+    return;
+  }
+  const y = v => pad.t + ph - (v / cap) * ph;
+  const yAxis = y;
+  const step = niceStep(cap);
+  const ticks = [];
+  for (let v = 0; v < cap; v += step) ticks.push(v);
+  if (cap - ticks[ticks.length - 1] < step / 2 && ticks.length > 1) ticks.pop();
+  ticks.push(cap);   // the capacity line is always labelled
+  for (const v of ticks) {
+    hline(ctx, pad.l, w - pad.r, yAxis(v), v === 0 ? C.axis : C.grid);
+    ctx.fillStyle = C.muted; ctx.fillText(String(v), pad.l - 6, yAxis(v));
+  }
+  timeAxis(ctx, pad.l, w - pad.r, h - pad.b + 6, CHART_WINDOW_MS);
+
+  ctx.save();
+  ctx.beginPath(); ctx.rect(pad.l, 0, pw, h); ctx.clip();
+  ctx.lineWidth = 2; ctx.lineJoin = 'round';
+  const ends = [];
+  for (const c of clients) {
+    const pts = bucketSeries(c, from, t);
+    if (!pts.length) continue;
+    ctx.strokeStyle = C.series[c.slot];
+    ctx.beginPath();
+    pts.forEach(([at, v], i) => i ? ctx.lineTo(x(at), y(v)) : ctx.moveTo(x(at), y(v)));
+    ctx.stroke();
+    const [, last] = pts[pts.length - 1];
+    ends.push({ c, y: y(last) });
+  }
+  ctx.restore();
+  switchMarkers(ctx, t, CHART_WINDOW_MS, pad.l, pad.l + pw, pad.t, pad.t + ph);
+
+  if (directLabels && ends.length) {
+    // Nudge end labels apart so they never overlap.
+    ends.sort((a, b) => a.y - b.y);
+    for (let i = 1; i < ends.length; i++) ends[i].y = Math.max(ends[i].y, ends[i - 1].y + 14);
+    ctx.font = '12px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    for (const e of ends) {
+      const ly = Math.min(e.y, h - pad.b - 4);
+      ctx.fillStyle = C.series[e.c.slot];
+      ctx.beginPath(); ctx.arc(w - pad.r + 8, ly, 4, 0, Math.PI * 2); ctx.fill();
+      ctx.fillStyle = C.ink2;
+      ctx.fillText(truncate(e.c.name, 11), w - pad.r + 16, ly);
+    }
+  }
+
+  if (hover.canvas === 'tokens' && hover.x >= pad.l && hover.x <= pad.l + pw) {
+    const at = from + ((hover.x - pad.l) / pw) * CHART_WINDOW_MS;
+    ctx.strokeStyle = C.axis; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(Math.round(hover.x) + 0.5, pad.t); ctx.lineTo(Math.round(hover.x) + 0.5, pad.t + ph); ctx.stroke();
+    const rows = clients.map(c => ({ c, v: bucketValueAt(c, at) })).filter(r => r.v != null);
+    for (const r of rows) {
+      ctx.fillStyle = C.series[r.c.slot]; ctx.strokeStyle = C.surface; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(hover.x, y(r.v), 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    }
+    const secs = Math.max(0, (t - at) / 1000);
+    showTip(`<div class="t-head">${secs < 0.5 ? 'now' : secs.toFixed(1) + ' s ago'}</div>` + (rows.length
+      ? rows.sort((a, b) => b.v - a.v).map(r => `<div class="t-row"><span><i class="dot" style="background:${seriesVar(r.c.slot)}"></i>${escapeHtml(r.c.name)}</span><b>${Math.floor(r.v)}${state.algo === 'leaky' ? ' waiting' : ''} / ${cap}</b></div>`).join('')
+      : '<div class="t-row"><span>No data at this time</span></div>'));
+  } else if (hover.canvas === 'tokens') {
+    $('tip').hidden = true;
+  }
+}
+
+// ---------- Timeline ----------
+
+function drawTimeline(t) {
+  const clients = state.clients;
+  const lane = 36;
+  const labelW = Math.min(150, Math.max(96, $('timeline').clientWidth * 0.16));
+  const pad = { l: labelW, r: 8, t: 4, b: 22 };
+  const height = Math.max(1, clients.length) * lane + pad.t + pad.b;
+  const { ctx, w, h } = fit($('timeline'), height);
+  const pw = w - pad.l - pad.r;
+  const from = t - TIMELINE_WINDOW_MS;
+  const x = at => pad.l + ((at - from) / TIMELINE_WINDOW_MS) * pw;
+
+  if (!clients.length) {
+    ctx.fillStyle = C.muted; ctx.font = '12px system-ui, sans-serif'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillText('Add a client to see its requests here.', w / 2, pad.t + lane / 2);
+    return;
+  }
+  const laneOf = new Map(clients.map((c, i) => [c.id, i]));
+  ctx.font = '12px system-ui, sans-serif'; ctx.textBaseline = 'middle'; ctx.textAlign = 'left';
+  clients.forEach((c, i) => {
+    const cy = pad.t + i * lane + lane / 2;
+    hline(ctx, pad.l, w - pad.r, cy, C.grid);
+    ctx.fillStyle = C.series[c.slot];
+    ctx.beginPath(); ctx.arc(8, cy, 4.5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = C.ink1;
+    ctx.fillText(truncate(c.name, 16), 20, cy);
+  });
+  timeAxis(ctx, pad.l, w - pad.r, h - pad.b + 6, TIMELINE_WINDOW_MS);
+  switchMarkers(ctx, t, TIMELINE_WINDOW_MS, pad.l, w - pad.r, pad.t, h - pad.b);
+
+  let nearest = null, best = 7;
+  for (const e of state.events) {
+    if (e.at < from) continue;
+    const i = laneOf.get(e.cid);
+    if (i === undefined) continue;
+    const cy = pad.t + i * lane + lane / 2;
+    const ex = x(e.at);
+    if (e.kind === 'ok') { ctx.fillStyle = C.good; ctx.fillRect(ex - 1, cy - 13, 2, 11); }
+    else if (e.kind === 'blocked') { ctx.fillStyle = C.critical; ctx.fillRect(ex - 1, cy + 2, 2, 11); }
+    else { ctx.fillStyle = C.muted; ctx.beginPath(); ctx.arc(ex, cy, 3, 0, Math.PI * 2); ctx.fill(); }
+    if (hover.canvas === 'timeline') {
+      const d = Math.hypot(hover.x - ex, hover.y - cy);
+      if (d < best) { best = d; nearest = e; }
+    }
+  }
+  if (nearest) {
+    const c = clientById(nearest.cid);
+    showTip(`<div class="t-head">${timeOf(nearest.wall)} · ${escapeHtml(c ? c.name : 'removed')}</div>
+      <div class="t-row"><span>Result</span><b>${resultHtml(nearest)}</b></div>
+      ${nearest.r != null ? `<div class="t-row"><span>Tokens left</span><b>${nearest.r}</b></div>` : ''}
+      ${nearest.retry != null ? `<div class="t-row"><span>Retry-After</span><b>${nearest.retry} s</b></div>` : ''}
+      <div class="t-row"><span>Latency</span><b>${nearest.latency.toFixed(1)} ms</b></div>`);
+  } else if (hover.canvas === 'timeline') {
+    $('tip').hidden = true;
+  }
+}
+
+// ---------- Flow animation ----------
+
+// A request flies into its client's bucket, waits there until the application answers, then
+// leaks out of the spout to the endpoint (200) or spills over the rim (429).
+const FLY_MS = 450, LEAVE_MS = 650, SPILL_MS = 500, MAX_WAIT_MS = 120_000;
+
+function spawnParticle(client) {
+  if (state.particles.length > 600) return null;   // keep animation smooth under heavy spam
+  const particle = { cid: client.id, slot: client.slot, born: now(), resolved: null, jitter: Math.random() * 2 - 1 };
+  state.particles.push(particle);
+  return particle;
+}
+
+// How full each client's bucket looks: waiting requests (leaky) or tokens left (token).
+function bucketFill(client, t) {
+  const cap = state.policy.q;
+  if (!cap) return { fraction: 0, label: '' };
+  if (state.algo === 'leaky') {
+    const waiting = Math.min(cap, client.inflight);
+    return { fraction: waiting / cap, label: `${waiting} waiting` };
+  }
+  const tokens = estimateTokens(client, t);
+  return tokens == null
+      ? { fraction: 1, label: `${cap} tokens` }
+      : { fraction: tokens / cap, label: `≈${Math.floor(tokens)} token${Math.floor(tokens) === 1 ? '' : 's'}` };
+}
+
+function drawBucket(ctx, cx, cy, fraction, color) {
+  const topW = 38, bottomW = 28, h = 30;
+  const top = cy - h / 2, bottom = cy + h / 2;
+  const shape = () => {
+    ctx.beginPath();
+    ctx.moveTo(cx - topW / 2, top);
+    ctx.lineTo(cx - bottomW / 2, bottom);
+    ctx.lineTo(cx + bottomW / 2, bottom);
+    ctx.lineTo(cx + topW / 2, top);
+  };
+  // Contents, clipped to the bucket's shape.
+  ctx.save();
+  shape(); ctx.closePath(); ctx.clip();
+  ctx.fillStyle = C.surface2; ctx.fillRect(cx - topW / 2, top, topW, h);
+  ctx.globalAlpha = 0.85; ctx.fillStyle = color;
+  const fillH = h * Math.max(0, Math.min(1, fraction));
+  ctx.fillRect(cx - topW / 2, bottom - fillH, topW, fillH);
+  ctx.restore();
+  // Walls and the spout the requests leak from.
+  ctx.strokeStyle = C.ink2; ctx.lineWidth = 1.5; ctx.lineJoin = 'round';
+  shape(); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(cx + bottomW / 2 - 2, bottom - 5); ctx.lineTo(cx + bottomW / 2 + 7, bottom - 1); ctx.stroke();
+}
+
+function drawFlow(t) {
+  const clients = state.clients;
+  // Side by side with the client list, the flow fills the same height so both end together.
+  let height = Math.max(260, clients.length * 44 + 60);
+  if (getComputedStyle($('flowPanel').parentElement).gridTemplateColumns.split(' ').length > 1) {
+    const head = $('flowPanel').querySelector('.panel-head');
+    height = Math.max(height, $('clientsPanel').offsetHeight - head.offsetHeight - 42);
+  }
+  const { ctx, w, h } = fit($('flow'), height);
+  const narrow = w < 560;
+  const left = narrow ? 92 : 150;
+  const gateX = Math.round(w * (narrow ? 0.56 : 0.58));
+  const boxW = narrow ? 104 : 150, boxH = 64;
+  const boxX = w - boxW - 8, midY = h / 2;
+  const top = 50, bottom = h - 56;
+  const laneY = i => clients.length === 1 ? midY : top + (bottom - top) * (i / (clients.length - 1 || 1));
+  const laneOf = new Map(clients.map((c, i) => [c.id, i]));
+
+  const bucketX = gateX - (narrow ? 48 : 70);
+  const rimOf = y => ({ x: bucketX - 12, y: y - 15 });
+  const spoutOf = y => ({ x: bucketX + 21, y: y + 14 });
+
+  // Client nodes, their buckets, and the paths to the filter.
+  ctx.font = '12px system-ui, sans-serif'; ctx.textBaseline = 'middle';
+  clients.forEach((c, i) => {
+    const y = laneY(i);
+    ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(bucketX - 20, y); ctx.stroke();
+    const spout = spoutOf(y);
+    ctx.beginPath(); ctx.moveTo(spout.x, spout.y); ctx.lineTo(gateX, y); ctx.stroke();
+    ctx.fillStyle = C.series[c.slot];
+    ctx.beginPath(); ctx.arc(left, y, 6, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = C.ink1; ctx.textAlign = 'right';
+    ctx.fillText(truncate(c.name, narrow ? 9 : 16), left - 12, y - (narrow ? 0 : 7));
+    if (!narrow) {
+      ctx.fillStyle = C.muted; ctx.font = '11px ui-monospace, Menlo, monospace';
+      ctx.fillText(truncate(c.identity, 18), left - 12, y + 8);
+      ctx.font = '12px system-ui, sans-serif';
+    }
+    const fill = bucketFill(c, t);
+    drawBucket(ctx, bucketX, y, fill.fraction, C.series[c.slot]);
+    ctx.fillStyle = C.ink2; ctx.font = '11px system-ui, sans-serif'; ctx.textAlign = 'center';
+    ctx.fillText(fill.label, bucketX, y + 25);
+    ctx.font = '12px system-ui, sans-serif';
+  });
+  if (!clients.length) {
+    ctx.fillStyle = C.muted; ctx.textAlign = 'left';
+    ctx.fillText('No clients', 12, midY);
+  }
+
+  // Filter → endpoint path.
+  ctx.strokeStyle = C.grid; ctx.lineWidth = 1;
+  ctx.beginPath(); ctx.moveTo(gateX, midY); ctx.lineTo(boxX, midY); ctx.stroke();
+
+  // The filter gate, flashing on recent decisions.
+  const okGlow = Math.max(0, 1 - (t - state.gate.okFlash) / 250);
+  const badGlow = Math.max(0, 1 - (t - state.gate.badFlash) / 250);
+  ctx.fillStyle = C.surface2;
+  roundRect(ctx, gateX - 8, top - 18, 16, bottom - top + 36, 6); ctx.fill();
+  if (badGlow > 0) { ctx.globalAlpha = 0.25 + 0.5 * badGlow; ctx.fillStyle = C.critical; roundRect(ctx, gateX - 8, top - 18, 16, bottom - top + 36, 6); ctx.fill(); }
+  else if (okGlow > 0) { ctx.globalAlpha = 0.2 + 0.4 * okGlow; ctx.fillStyle = C.good; roundRect(ctx, gateX - 8, top - 18, 16, bottom - top + 36, 6); ctx.fill(); }
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = C.ink1; ctx.textAlign = 'center'; ctx.font = '600 12px system-ui, sans-serif';
+  ctx.fillText('RateLimitFilter', gateX, 8);
+  ctx.fillStyle = C.ink2; ctx.font = '11px system-ui, sans-serif';
+  ctx.fillText(ALGOS[state.algo].label.toLowerCase(), gateX, 22);
+
+  // The endpoint.
+  const pulse = Math.max(0, 1 - (t - state.gate.endpointFlash) / 300);
+  ctx.fillStyle = C.surface2; roundRect(ctx, boxX, midY - boxH / 2, boxW, boxH, 10); ctx.fill();
+  ctx.strokeStyle = pulse > 0 ? C.good : C.axis; ctx.lineWidth = 1 + pulse * 1.5;
+  roundRect(ctx, boxX, midY - boxH / 2, boxW, boxH, 10); ctx.stroke();
+  ctx.fillStyle = C.ink1; ctx.font = '600 12px ui-monospace, Menlo, monospace';
+  ctx.fillText(narrow ? '/api/hello' : 'GET /api/hello', boxX + boxW / 2, midY - 9);
+  ctx.fillStyle = C.ink2; ctx.font = '12px system-ui, sans-serif';
+  ctx.fillText(`${fmt(state.totals.ok)} × 200 OK`, boxX + boxW / 2, midY + 11);
+
+  // Requests: into the bucket, out of the spout, or over the rim.
+  const alive = [];
+  for (const p of state.particles) {
+    const i = laneOf.get(p.cid);
+    const arrived = p.born + FLY_MS;
+    if (i === undefined || (!p.resolved && t - p.born > MAX_WAIT_MS)) continue;
+    const y0 = laneY(i), rim = rimOf(y0), spout = spoutOf(y0);
+    let px, py, color = C.series[p.slot], alpha = 1, cross = false;
+    if (t < arrived) {
+      const k = ease((t - p.born) / FLY_MS);
+      px = left + (rim.x - left) * k;
+      py = y0 + (rim.y - y0) * k * k;   // a slight arc down into the bucket
+    } else if (!p.resolved) {
+      alive.push(p);                     // waiting inside the bucket; shown by its fill level
+      continue;
+    } else {
+      const start = Math.max(p.resolved.at, arrived);
+      if (p.resolved.ok) {
+        const k = (t - start) / LEAVE_MS;
+        if (k > 1) continue;
+        if (k < 0.3) {
+          const e = ease(k / 0.3);
+          px = spout.x + (gateX - spout.x) * e; py = spout.y + (y0 - spout.y) * e;
+        } else {
+          if (!p.flashed) { p.flashed = true; state.gate.okFlash = t; }
+          const e = ease((k - 0.3) / 0.7);
+          px = gateX + 10 + (boxX - gateX - 10) * e; py = y0 + (midY - y0) * e;
+          if (k > 0.97 && !p.arrived) { p.arrived = true; state.gate.endpointFlash = t; }
+        }
+      } else {
+        const k = (t - start) / SPILL_MS;
+        if (k > 1) continue;
+        if (!p.flashed) { p.flashed = true; state.gate.badFlash = t; }
+        const e = ease(k);
+        px = rim.x - 34 * e; py = rim.y + 26 * e * e + p.jitter * 6 * e;
+        color = C.critical; alpha = 1 - k; cross = true;
+      }
+    }
+    alive.push(p);
+    ctx.globalAlpha = alpha;
+    if (cross) {
+      ctx.strokeStyle = color; ctx.lineWidth = 2.5; ctx.lineCap = 'round';
+      ctx.beginPath(); ctx.moveTo(px - 4, py - 4); ctx.lineTo(px + 4, py + 4); ctx.moveTo(px + 4, py - 4); ctx.lineTo(px - 4, py + 4); ctx.stroke();
+    } else {
+      ctx.fillStyle = color; ctx.strokeStyle = C.surface; ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(px, py, 4.5, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    }
+  }
+  ctx.globalAlpha = 1;
+  state.particles = alive;
+
+  // Running totals beside the gate.
+  ctx.font = '12px system-ui, sans-serif'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+  ctx.fillStyle = C.good; ctx.fillText('✓', gateX + 16, h - 10);
+  ctx.fillStyle = C.ink2; ctx.fillText(`${fmt(state.totals.ok)} passed`, gateX + 30, h - 10);
+  ctx.textAlign = 'right';
+  ctx.fillStyle = C.ink2; ctx.fillText(`${fmt(state.totals.blocked)} blocked`, gateX - 16, h - 10);
+  const bw = ctx.measureText(`${fmt(state.totals.blocked)} blocked`).width;
+  ctx.fillStyle = C.critical; ctx.fillText('✕', gateX - 20 - bw, h - 10);
+}
+
+function roundRect(ctx, x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+const ease = k => 1 - Math.pow(1 - Math.min(1, Math.max(0, k)), 2);
+
+// ---------- Tiles, status, log ----------
+
+function renderTiles(t) {
+  const T = state.totals;
+  $('tSent').textContent = fmt(T.sent);
+  $('tSentNote').textContent = T.errors ? `${fmt(T.errors)} errors (no answer)` : 'no errors';
+  $('tOk').textContent = fmt(T.ok);
+  $('tBlocked').textContent = fmt(T.blocked);
+  const answered = T.ok + T.blocked;
+  $('tRate').textContent = answered ? (100 * T.blocked / answered).toFixed(1) + '%' : '–';
+  let n = 0, okN = 0;
+  for (let i = state.events.length - 1; i >= 0 && state.events[i].at >= t - 5000; i--) {
+    n++; if (state.events[i].kind === 'ok') okN++;
+  }
+  $('tTput').textContent = (n / 5).toFixed(1);
+  $('tTputNote').textContent = `req/s, last 5 s · ${(okN / 5).toFixed(1)} passed/s`;
+
+  // Time from sending to the answer for passed requests; a queue makes this grow.
+  const waits = [];
+  for (let i = state.events.length - 1; i >= 0 && state.events[i].at >= t - 5000; i--) {
+    if (state.events[i].kind === 'ok') waits.push(state.events[i].latency);
+  }
+  waits.sort((a, b) => a - b);
+  const pct = p => waits[Math.min(waits.length - 1, Math.floor(p * waits.length))];
+  $('tWait').textContent = waits.length ? formatWait(pct(0.5)) : '–';
+  $('tWaitNote').textContent = waits.length ? `median · p95 ${formatWait(pct(0.95))}` : 'median, last 5 s';
+}
+
+const formatWait = ms => ms < 1000 ? `${Math.round(ms)} ms` : `${(ms / 1000).toFixed(1)} s`;
+
+function setPill(id, cls, icon, text) {
+  const el = $(id);
+  el.className = 'pill ' + cls;
+  const i = el.querySelector('.icon');
+  if (i) i.textContent = icon;
+  el.querySelector('.text').textContent = text;
+}
+
+function renderStatus() {
+  const conn = {
+    ok: ['good', '●', 'Connected'],
+    down: ['bad', '✕', 'Application unreachable'],
+    unknown: ['', '…', 'Connecting'],
+  }[state.conn];
+  setPill('conn', ...conn);
+  const { q, w } = state.policy;
+  $('policy').querySelector('.text').textContent = q ? `${q} tokens / ${w} s · ${(q / w).toFixed(2)} tokens/s` : 'Policy unknown';
+  const trust = {
+    on: ['good', '●', 'IP clients: separate buckets'],
+    off: ['warn', '!', 'IP clients: one shared bucket'],
+    unknown: ['', '…', 'IP mode unknown'],
+  }[state.trust];
+  setPill('trust', ...trust);
+  setPill('conns', ...(state.conn !== 'ok' ? ['', '…', 'Connections unknown']
+      : state.sharding ? ['good', '●', `Up to ${6 * SHARDS} open requests per client`]
+      : ['warn', '!', 'Up to 6 open requests, shared']));
+
+  const banner = $('banner');
+  if (state.conn === 'down') {
+    banner.className = 'banner bad'; banner.hidden = false;
+    banner.innerHTML = `<span class="icon" style="color:var(--critical)">✕</span><div>No usable answer from the ${ALGOS[state.algo].label.toLowerCase()} application at <code>${escapeHtml(apiBase())}</code>. Either it is not running, or it does not allow this page's origin (CORS). Start it in the <code>NASP</code> folder with <code>./mvnw spring-boot:run ${escapeHtml(ALGOS[state.algo].start)}</code>, then press Re-check.</div>`;
+  } else if (state.trust === 'off') {
+    banner.className = 'banner'; banner.hidden = false;
+    banner.innerHTML = `<span class="icon" style="color:var(--warning)">!</span><div><b>X-Forwarded-For is not trusted</b>, so every IP client is charged to one bucket: this machine's address. Restart the application with the <code>observability</code> profile (or <code>RATELIMIT_TRUSTFORWARDEDFOR=true</code>) to give each simulated address its own bucket. API-key clients are unaffected.</div>`;
+  } else {
+    banner.hidden = true;
+  }
+}
+
+function resultHtml(e) {
+  if (e.kind === 'ok') return '<span class="result-ok">✓ 200 passed</span>';
+  if (e.kind === 'blocked') return '<span class="result-bad">✕ 429 blocked</span>';
+  return '<span class="result-err">● no answer</span>';
+}
+
+let lastLogKey = '';
+function renderLog() {
+  if ($('logPause').checked) return;
+  const filter = $('logFilter').value;
+  const rows = [];
+  for (let i = state.events.length - 1; i >= 0 && rows.length < 150; i--) {
+    const e = state.events[i];
+    if (filter === 'all' || filter === e.kind) rows.push(e);
+  }
+  const key = filter + ':' + state.events.length + ':' + (rows[0]?.at ?? 0) + ':' + state.clients.map(c => c.name).join();
+  if (key === lastLogKey) return;
+  lastLogKey = key;
+  $('log').innerHTML = rows.map(e => {
+    const c = clientById(e.cid);
+    const name = c ? escapeHtml(c.name) : 'removed';
+    const dot = c ? `<i class="dot" style="background:${seriesVar(c.slot)};margin-right:6px"></i>` : '';
+    return `<tr><td class="mono">${timeOf(e.wall)}</td><td>${dot}${name}</td><td class="mono">${escapeHtml(e.identity)}</td>
+      <td>${resultHtml(e)}</td><td class="num">${e.r ?? '–'}</td><td class="num">${e.retry != null ? e.retry + ' s' : '–'}</td>
+      <td class="num">${e.latency.toFixed(1)} ms</td></tr>`;
+  }).join('') || '<tr><td colspan="7" style="color:var(--muted)">No requests yet. Start a client.</td></tr>';
+}
+
+// ---------- Utilities ----------
+
+const fmt = n => n.toLocaleString('en-US');
+const truncate = (s, n) => s.length > n ? s.slice(0, n - 1) + '…' : s;
+const escapeHtml = s => String(s).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+const timeOf = d => d.toLocaleTimeString('en-GB', { hour12: false }) + '.' + String(d.getMilliseconds()).padStart(3, '0');
+
+function prune(t) {
+  const cutoff = t - KEEP_MS;
+  let i = 0;
+  while (i < state.events.length && state.events[i].at < cutoff) i++;
+  if (i) state.events.splice(0, i);
+  if (state.events.length > 40_000) state.events.splice(0, state.events.length - 40_000);
+  for (const c of state.clients) {
+    // Keep the last observation before the window so the token line starts at the left edge.
+    let j = 0;
+    while (j + 1 < c.obs.length && c.obs[j + 1].at < cutoff) j++;
+    if (j) c.obs.splice(0, j);
+    let k = 0;
+    while (k + 1 < c.fill.length && c.fill[k + 1].at < cutoff) k++;
+    if (k) c.fill.splice(0, k);
+  }
+}
+
+// ---------- Main loop ----------
+
+let lastSlow = 0;
+function frame() {
+  const t = now();
+  drawFlow(t);
+  if (t - lastSlow > 200) {
+    lastSlow = t;
+    prune(t);
+    if (state.algo === 'leaky' && state.policy.q) {
+      for (const c of state.clients) c.fill.push({ at: t, v: Math.min(state.policy.q, c.inflight) });
+    }
+    drawThroughput(t);
+    drawTokens(t);
+    drawTimeline(t);
+    renderTiles(t);
+    for (const c of state.clients) updateCardStats(c);
+    renderLog();
+    if (!hover.canvas) $('tip').hidden = true;
+  }
+  requestAnimationFrame(frame);
+}
+
+// ---------- Wiring ----------
+
+function applyTheme(theme) {
+  if (theme) document.documentElement.dataset.theme = theme;
+  readColors();
+}
+$('theme').addEventListener('click', () => {
+  const dark = getComputedStyle(document.documentElement).colorScheme === 'dark';
+  const next = dark ? 'light' : 'dark';
+  try { localStorage.setItem('nasp-observability-theme', next); } catch {}
+  applyTheme(next);
+});
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => readColors());
+
+$('startAll').addEventListener('click', () => state.clients.forEach(start));
+$('stopAll').addEventListener('click', () => state.clients.forEach(stop));
+$('clear').addEventListener('click', () => {
+  state.events = []; state.particles = [];
+  state.totals = { sent: 0, ok: 0, blocked: 0, errors: 0 };
+  for (const c of state.clients) {
+    c.stats = { sent: 0, ok: 0, blocked: 0, errors: 0 };
+    c.obs = c.last ? [{ at: c.last.at, r: c.last.r }] : [];
+  }
+  lastLogKey = '';
+});
+function recheck() { state.conn = 'unknown'; state.trust = 'unknown'; renderStatus(); return probe(); }
+$('recheck').addEventListener('click', recheck);
+$('apiBase').addEventListener('change', e => {
+  state.backends[state.algo] = e.target.value.trim().replace(/\/+$/, '') || state.backends[state.algo];
+  e.target.value = apiBase();
+  saveSettings();
+  recheck();
+});
+
+function saveSettings() {
+  try {
+    localStorage.setItem('nasp-observability-backends', JSON.stringify(state.backends));
+    localStorage.setItem('nasp-observability-algo', state.algo);
+  } catch {}
+}
+
+function renderAlgorithm() {
+  for (const button of document.querySelectorAll('.seg button')) {
+    button.setAttribute('aria-checked', String(button.dataset.algo === state.algo));
+  }
+  const algo = ALGOS[state.algo];
+  $('algoHint').textContent = algo.hint;
+  $('bucketTitle').textContent = algo.title;
+  $('bucketNote').textContent = algo.note;
+  $('apiBase').value = apiBase();
+}
+
+// Each algorithm runs in its own application, so a switch changes the address the clients call.
+// Their buckets there are separate, so the per-client bucket views start over.
+function switchAlgorithm(algo) {
+  if (algo === state.algo) return;
+  state.algo = algo;
+  state.switches.push({ at: now(), algo });
+  for (const c of state.clients) { c.obs = []; c.fill = []; c.last = null; c.pausedUntil = 0; }
+  saveSettings();
+  renderAlgorithm();
+  recheck();
+}
+for (const button of document.querySelectorAll('.seg button')) {
+  button.addEventListener('click', () => switchAlgorithm(button.dataset.algo));
+}
+
+$('logFilter').addEventListener('change', () => { lastLogKey = ''; renderLog(); });
+
+let savedTheme = null;
+try {
+  savedTheme = localStorage.getItem('nasp-observability-theme');
+  Object.assign(state.backends, JSON.parse(localStorage.getItem('nasp-observability-backends') || '{}'));
+  state.algo = localStorage.getItem('nasp-observability-algo') === 'leaky' ? 'leaky' : 'token';
+} catch {}
+// ?token=…, ?leaky=… and ?algo=leaky override the remembered settings.
+const query = new URLSearchParams(location.search);
+for (const key of ['token', 'leaky']) {
+  if (query.get(key)) state.backends[key] = query.get(key).replace(/\/+$/, '');
+}
+if (query.get('algo') in ALGOS) state.algo = query.get('algo');
+renderAlgorithm();
+applyTheme(savedTheme);
+for (const preset of PRESETS.slice(0, 5)) addClient(preset);
+renderStatus();
+probe().then(() => { if (location.hash === '#autostart') state.clients.forEach(start); });
+setInterval(tick, 10);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

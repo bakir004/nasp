@@ -35,6 +35,25 @@ class RateLimitContractTests {
     }
 
     @Test
+    void selectsAlgorithmAtStartup() {
+        contextRunner.run(context ->
+                assertThat(limiterOf(context.getBean(RequestAdmitter.class))).isInstanceOf(AtomicTokenBucketLimiter.class));
+        contextRunner.withPropertyValues("rate-limit.algorithm=token-bucket").run(context ->
+                assertThat(limiterOf(context.getBean(RequestAdmitter.class))).isInstanceOf(AtomicTokenBucketLimiter.class));
+        contextRunner.withPropertyValues("rate-limit.algorithm=leaky-bucket").run(context ->
+                assertThat(limiterOf(context.getBean(RequestAdmitter.class))).isInstanceOf(LeakyBucketLimiter.class));
+        contextRunner.withPropertyValues("rate-limit.algorithm=leaky-bucket-queue").run(context ->
+                assertThat(context.getBean(RequestAdmitter.class)).isInstanceOf(LeakyBucketQueue.class));
+        contextRunner.withPropertyValues("rate-limit.algorithm=fifo").run(context ->
+                assertThat(context).hasFailed());
+    }
+
+    private static RateLimiter limiterOf(RequestAdmitter admitter) {
+        assertThat(admitter).isInstanceOf(RequestAdmitter.Immediate.class);
+        return ((RequestAdmitter.Immediate) admitter).limiter();
+    }
+
+    @Test
     void invalidConfigurationFailsStartup() {
         for (String property : new String[]{"rate-limit.capacity-tokens=0",
                 "rate-limit.capacity-tokens=-1", "rate-limit.window-seconds=0",
