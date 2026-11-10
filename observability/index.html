@@ -388,10 +388,10 @@ const ALGOS = {
   },
   leaky: {
     label: 'Leaky bucket',
-    hint: 'Requests wait in each client\'s bucket (a ring buffer) and leak out one at a time at the policy rate. Bursts are delayed, not passed at once; only a full bucket rejects.',
+    hint: 'Requests wait in each client\'s bucket and leak out one at a time at the policy rate. Bursts are delayed, not passed at once; only a full bucket rejects.',
     title: 'Requests waiting in bucket',
     note: 'Sampled live from each client\'s unanswered requests',
-    start: '-Dspring-boot.run.profiles=observability -Dspring-boot.run.arguments="--server.port=8081 --rate-limit.algorithm=leaky-bucket-queue"',
+    start: '-Dspring-boot.run.profiles=observability -Dspring-boot.run.arguments="--server.port=8081 --rate-limit.algorithm=leaky-bucket"',
   },
 };
 const now = () => performance.now();

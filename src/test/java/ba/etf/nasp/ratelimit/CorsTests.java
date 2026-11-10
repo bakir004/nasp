@@ -23,7 +23,7 @@ class CorsTests {
     // The context and its limiter are shared across tests, so each test uses its own client address.
     @Nested
     @SpringBootTest(properties = {"rate-limit.capacity-tokens=2", "rate-limit.window-seconds=60",
-            "cors.allowed-origins=null,http://localhost:[*]"})
+            "rate-limit.cors-allowed-origins=null,http://localhost:[*]"})
     @AutoConfigureMockMvc
     class Enabled {
 

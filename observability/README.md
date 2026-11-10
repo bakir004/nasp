@@ -14,14 +14,14 @@ folder, one per algorithm (two terminals):
 # Token bucket on port 8080
 ./mvnw spring-boot:run -Dspring-boot.run.profiles=observability
 
-# Leaky bucket (queue) on port 8081
+# Leaky bucket on port 8081
 ./mvnw spring-boot:run -Dspring-boot.run.profiles=observability \
-    -Dspring-boot.run.arguments="--server.port=8081 --rate-limit.algorithm=leaky-bucket-queue"
+    -Dspring-boot.run.arguments="--server.port=8081 --rate-limit.algorithm=leaky-bucket"
 ```
 
-Each application runs one algorithm, chosen at startup by `rate-limit.algorithm`
-(`token-bucket` by default; see the main README for the others). If you only
-want one algorithm, start only that application.
+Each application runs one algorithm, chosen at startup by `rate-limit.algorithm`:
+`token-bucket` (the default) or `leaky-bucket`. If you only want one algorithm,
+start only that application.
 
 The profile (`src/main/resources/application-observability.properties`) sets:
 
@@ -29,7 +29,7 @@ The profile (`src/main/resources/application-observability.properties`) sets:
 |---|---|---|
 | `rate-limit.capacity-tokens` / `window-seconds` | 20 / 10 | A 2 tokens/s refill, so limits are hit within seconds |
 | `rate-limit.trust-forwarded-for` | `true` | Each simulated IP address gets its own bucket |
-| `cors.allowed-origins` | `null`, `http://localhost:[*]`, `http://127.0.0.1:[*]` | Lets the page call the API from a file or a local web server |
+| `rate-limit.cors-allowed-origins` | `null`, `http://localhost:[*]`, `http://127.0.0.1:[*]` | Lets the page call the API from a file or a local web server |
 
 **2. Open `observability/index.html`** in a browser (double-click it), and press
 **Start all**. No build step or server is needed.
@@ -59,7 +59,7 @@ page can read them.
 Both applications use the same capacity (20) and rate (2 per second), but they
 treat a burst differently:
 
-| | Token bucket (`:8080`) | Leaky bucket queue (`:8081`) |
+| | Token bucket (`:8080`) | Leaky bucket (`:8081`) |
 |---|---|---|
 | A burst of 30 | 20 pass **at once**, 10 rejected | 1 passes, 19 **wait** and leave one every 0.5 s, 10 rejected |
 | What reaches `/api/hello` | Spikes | A steady 2 per second per client |
@@ -84,7 +84,7 @@ separate buckets, so each client's bucket view starts over after a switch.
 | Totals | Requests sent, passed (200), blocked (429), block rate, throughput, and wait (median and p95 time from sending to a 200) over the last 5 s |
 | Request flow | Every request animated from the moment it is sent: into its client's bucket, out of the spout to the endpoint (200) or over the rim (429). Each bucket shows tokens left or requests waiting. Shown beside the client controls on wide screens |
 | Throughput per second | Passed vs blocked requests per second for the last 60 s |
-| Tokens remaining / Requests waiting | Token bucket: tokens left from the `RateLimit` header, following the refill rate between responses. Leaky bucket queue: requests waiting in each client's bucket, sampled five times per second |
+| Tokens remaining / Requests waiting | Token bucket: tokens left from the `RateLimit` header, following the refill rate between responses. Leaky bucket: requests waiting in each client's bucket, sampled five times per second |
 | Request timeline | One lane per client for the last 30 s: ticks above the lane passed, ticks below were blocked |
 | Clients | One compact row per client: name, traffic mode and its parameters, start/stop, counts, and a live bucket gauge. ⋯ opens the identity settings |
 | Request log | The latest 150 requests with result, remaining tokens, `Retry-After`, and latency |

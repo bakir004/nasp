@@ -17,9 +17,9 @@ import static org.assertj.core.api.Assertions.assertThat;
 
 // A real server, because queued requests are released through servlet async dispatch.
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT, properties = {
-        "rate-limit.algorithm=leaky-bucket-queue", "rate-limit.capacity-tokens=4",
+        "rate-limit.algorithm=leaky-bucket", "rate-limit.capacity-tokens=4",
         "rate-limit.window-seconds=1", "server.tomcat.threads.max=2"})
-class LeakyBucketQueueHttpTests {
+class LeakyBucketLimiterHttpTests {
 
     private record Result(int status, String body, long millis) {
     }

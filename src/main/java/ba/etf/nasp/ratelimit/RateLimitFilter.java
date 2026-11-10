@@ -1,6 +1,6 @@
 package ba.etf.nasp.ratelimit;
 
-import ba.etf.nasp.ratelimit.RequestAdmitter.Admission;
+import ba.etf.nasp.ratelimit.RateLimiter.Decision;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.servlet.AsyncContext;
 import jakarta.servlet.FilterChain;
@@ -19,7 +19,7 @@ import org.springframework.web.filter.OncePerRequestFilter;
 
 /**
  * Charges one token per request and rejects exhausted clients before they reach a controller.
- * A request that a shaping queue admits for later is suspended with servlet async processing,
+ * A request that has to wait in a leaky bucket queue is suspended with servlet async processing,
  * so it holds no server thread while it waits, and continues when the queue releases it.
  */
 public class RateLimitFilter extends OncePerRequestFilter {
@@ -30,37 +30,38 @@ public class RateLimitFilter extends OncePerRequestFilter {
     static final String QUOTA_EXCEEDED_TYPE =
             "https://iana.org/assignments/http-problem-types#quota-exceeded";
 
-    private final RequestAdmitter admitter;
+    private final RateLimiter rateLimiter;
     private final ClientKeyResolver clientKeyResolver;
+    private final RateLimitProperties properties;
     private final ObjectMapper objectMapper;
 
-    public RateLimitFilter(RequestAdmitter admitter, ClientKeyResolver clientKeyResolver,
-            ObjectMapper objectMapper) {
-        this.admitter = Objects.requireNonNull(admitter, "admitter");
+    public RateLimitFilter(RateLimiter rateLimiter, ClientKeyResolver clientKeyResolver,
+            RateLimitProperties properties, ObjectMapper objectMapper) {
+        this.rateLimiter = Objects.requireNonNull(rateLimiter, "rateLimiter");
         this.clientKeyResolver = Objects.requireNonNull(clientKeyResolver, "clientKeyResolver");
+        this.properties = Objects.requireNonNull(properties, "properties");
         this.objectMapper = Objects.requireNonNull(objectMapper, "objectMapper");
     }
 
     @Override
     protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
             FilterChain filterChain) throws ServletException, IOException {
-        Admission admission = admitter.admit(clientKeyResolver.resolve(request));
-        RateLimitDecision decision = admission.decision();
+        Decision decision = rateLimiter.tryAcquire(clientKeyResolver.resolve(request));
         setRateLimitHeaders(response, decision);
         if (!decision.allowed()) {
             writeTooManyRequests(request, response, decision);
-        } else if (admission.released().toCompletableFuture().isDone()) {
+        } else if (decision.ready().isDone()) {
             filterChain.doFilter(request, response);
         } else if (request.isAsyncSupported()) {
             AsyncContext async = request.startAsync();
             // A queued request waits at most one window; the margin covers a slow release.
-            async.setTimeout(decision.windowSeconds() * 1000 + 30_000);
+            async.setTimeout(properties.windowSeconds() * 1000L + 30_000);
             // The async dispatch re-enters the filter chain, where OncePerRequestFilter skips this
             // filter (it already ran) and the request continues to the controller.
-            admission.released().thenRun(() -> dispatch(async));
+            decision.ready().thenRun(() -> dispatch(async));
         } else {
             // Without async support the request waits for its release on its own thread.
-            admission.released().toCompletableFuture().join();
+            decision.ready().join();
             filterChain.doFilter(request, response);
         }
     }
@@ -74,10 +75,10 @@ public class RateLimitFilter extends OncePerRequestFilter {
     }
 
     // Header syntax follows the IETF HTTPAPI RateLimit header fields draft.
-    private static void setRateLimitHeaders(HttpServletResponse response, RateLimitDecision decision) {
+    private void setRateLimitHeaders(HttpServletResponse response, Decision decision) {
         response.setHeader(RATE_LIMIT_POLICY_HEADER, "\"" + POLICY_NAME + "\";q="
-                + decision.capacityTokens() + ";w=" + decision.windowSeconds());
-        String limit = "\"" + POLICY_NAME + "\";r=" + decision.remainingTokens();
+                + properties.capacityTokens() + ";w=" + properties.windowSeconds());
+        String limit = "\"" + POLICY_NAME + "\";r=" + decision.remaining();
         if (!decision.allowed()) {
             limit += ";t=" + decision.retryAfterSeconds();
         }
@@ -85,7 +86,7 @@ public class RateLimitFilter extends OncePerRequestFilter {
     }
 
     private void writeTooManyRequests(HttpServletRequest request, HttpServletResponse response,
-            RateLimitDecision decision) throws IOException {
+            Decision decision) throws IOException {
         Map<String, Object> problem = new LinkedHashMap<>();
         problem.put("type", QUOTA_EXCEEDED_TYPE);
         problem.put("title", HttpStatus.TOO_MANY_REQUESTS.getReasonPhrase());
